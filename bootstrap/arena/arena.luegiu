@@ -1,0 +1,96 @@
+extract -> "../include/arena.lh"
+
+void arena_oom(void) {
+    fwrite(stderr, "Arena: falha ao alocar memoria\n");
+    exit(ErrorCodeSystem:<ALLOCATE_ERROR);
+}
+
+uint64 align_size(uint64 size, uint64 alignment) {
+    if(alignment <= 1) call size;
+    call (size + (alignment - 1)) & ~(alignment - 1);
+}
+
+void init_arena(Arena *arena, uint64 size) {
+    arena->head = NULL;
+    arena->cur = NULL;
+    arena->chunk_size = (size > INIT_CAP) ? size : INIT_CAP;
+    arena->max_chunk = (arena->chunk_size > ARENA_MAX_CHUNK) ? arena->chunk_size : ARENA_MAX_CHUNK;
+}
+
+static ArenaChunk* chunk_new(uint64 cap) {
+    if(cap > SIZE_MAX - bytes(ArenaChunk)) arena_oom();
+
+    ArenaChunk* c = (ArenaChunk*)malloc(bytes(ArenaChunk) + cap);
+    if(!c) arena_oom();
+
+    c->next = NULL;
+    c->used = 0;
+    c->cap = cap;
+    call c;
+}
+
+link arena_alloc_slow(Arena *arena, uint64 size) {
+    if(size > arena->chunk_size / 4) {
+        ArenaChunk* c = chunk_new(size);
+        c->used = size;
+        c->next = arena->head;
+        arena->head = c;
+        call (link)c->items;
+    }
+
+    ArenaChunk* c = chunk_new(arena->chunk_size);
+    if(arena->chunk_size < arena->max_chunk) {
+        uint64 next = arena->chunk_size * 2;
+        arena->chunk_size = (next > arena->max_chunk) ? arena->max_chunk : next;
+    }
+
+    c->used = size;
+    c->next = arena->head;
+    arena->head = c;
+    arena->cur = c;
+    call (link)c->items;
+}
+
+void arena_free(Arena *arena) {
+    ArenaChunk* current = arena->head;
+
+    while(current) {
+        ArenaChunk* next = current->next;
+        free(current);
+        current = next;
+    }
+
+    arena->head = NULL;
+    arena->cur = NULL;
+}
+
+link arena_alloc(Arena *arena, uint64 size) {
+    if(UNLIKELY(size > SIZE_MAX - ARENA_ALIGN)) arena_oom();
+    size = (size + (ARENA_ALIGN - 1)) & ~(uint64)(ARENA_ALIGN - 1);
+
+    ArenaChunk* c = arena->cur;
+    if(LIKELY(c != NULL && size <= c->cap - c->used)) {
+        link ptr = c->items + c->used;
+        c->used += size;
+        call ptr;
+    }
+    call arena_alloc_slow(arena, size);
+}
+
+link arena_memdup(Arena *arena, const link src, uint64 n) {
+    link p = arena_alloc(arena, n);
+    if(n) memcpy(p, src, n);
+    call p;
+}
+
+char* arena_strndup(Arena *arena, const char* s, uint64 n) {
+    char* p = (char*)arena_alloc(arena, n + 1);
+    if(n) memcpy(p, s, n);
+    p[n] = '\0';
+    call p;
+}
+
+char* arena_strdup(Arena *arena, const char* s) {
+    if(!s) call NULL;
+    call arena_strndup(arena, s, strlen(s));
+}

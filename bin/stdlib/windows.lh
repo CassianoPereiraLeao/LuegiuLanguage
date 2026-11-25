@@ -1,0 +1,128 @@
+use target -> single
+
+extract -> [kernel32]
+extract -> [user32]
+extract -> [gdi32]
+extract -> [bool.lh]
+
+preprocess NULL -> (link)0
+preprocess PATH_MAX -> 4096
+
+newtype uint16 WORD;
+newtype uint64 WINSIZE;
+newtype uint32 DWORD;
+newtype hexa FLAGS;
+newtype uint32 WINUINT32;
+newtype utfchar WINWCHAR;
+newtype char WINCHAR;
+
+newtype data {
+    int32 unused;
+} HINSTANCE__;
+
+extern DWORD GetModuleFileNameA(HINSTANCE__* module, WINCHAR* filename, WINSIZE size);
+extern DWORD GetModuleFileNameW(HINSTANCE__* module, WINWCHAR* filename, WINSIZE size);
+extern link fileno(int32 fd);
+extern int32 __isatty(link h);
+extern utfchar* getenv(utfchar* name);
+extern WINWCHAR* GetEnvironmentStringsW();
+extern DWORD GetFullPathNameA(const WINCHAR* filename, WINSIZE buffer_len, WINCHAR* buffer, WINCHAR file_part);
+extern DWORD GetFullPathNameW(const WINWCHAR* filename, WINSIZE buffer_len, WINWCHAR* buffer, WINWCHAR** file_part);
+extern DWORD GetEnvironmentVariableA(const WINCHAR* name, WINCHAR* buffer, WINSIZE size);
+extern DWORD GetEnvironmentVariableW(const WINWCHAR* name, WINWCHAR* buffer, WINSIZE size);
+extern void SetLastError(DWORD code);
+extern bool SetEndOfFile(link file);
+extern DWORD GetFileSize(link file, int64* file_size);
+extern bool GetFileSizeEx(link file, int64* file_size);
+extern DWORD SetFilePointer(link file, int32 distance, int32* distance_to_move, DWORD method);
+extern bool SetFilePointerEx(link file, int64 distance, int64* new_file_ptr, DWORD method);
+extern void Sleep(WINUINT32 sleep_time);
+extern WINCHAR* GetCommandLineA();
+extern WINWCHAR* GetCommandLineW();
+extern bool PathIsSameRootA(const WINCHAR* path1, const WINCHAR* path2);
+extern bool PathIsSameRootW(const WINWCHAR* path1, const WINWCHAR* path2);
+extern bool PathMatchSpecA(const WINCHAR* file, const WINCHAR* spec);
+extern bool PathMatchSpecW(const WINWCHAR* file, const WINWCHAR* spec);
+extern int32 PathGetDriveNumberA(const WINCHAR* path);
+extern int32 PathGetDriveNumberW(const WINWCHAR* path);
+extern WINCHAR* PathCombineA(WINCHAR* dest, const WINCHAR* dir, const WINCHAR* file);
+extern WINWCHAR* PathCombineW(WINWCHAR* dest, const WINWCHAR* dir, const WINWCHAR* file);
+extern bool PathAppendA(WINCHAR* path, const WINCHAR* append);
+extern bool PathAppendW(WINWCHAR* path, const WINWCHAR* append);
+extern bool PathCanonicalizeA(WINCHAR* buffer, const WINCHAR* path);
+extern bool PathCanonicalizeW(WINWCHAR* buffer, const WINWCHAR* path);
+extern WINCHAR* PathFindFileNameA(const WINCHAR* path);
+extern WINWCHAR* PathFindFileNameW(const WINWCHAR* path);
+extern WINCHAR* PathFindExtensionA(const WINCHAR* path);
+extern WINWCHAR* PathFindExtensionW(const WINWCHAR* path);
+extern bool PathRemoveFileSpecA(WINCHAR* path);
+extern bool PathRemoveFileSpecW(WINWCHAR* path);
+extern void PathStripPathA(WINCHAR* path);
+extern void PathStripPathW(WINWCHAR* path);
+extern bool PathStripToRootA(WINCHAR* path);
+extern bool PathStripToRootW(WINWCHAR* path);
+extern bool PathRemoveExtensionA(WINCHAR* path);
+extern bool PathRemoveExtensionW(WINWCHAR* path);
+extern bool PathRenameExtensionA(WINCHAR* path, const WINCHAR* extension);
+extern bool PathRenameExtensionW(WINWCHAR* path, const WINWCHAR* extension);
+extern bool PathAddExtensionA(WINCHAR* path, const WINCHAR* extension);
+extern bool PathAddExtensionW(WINWCHAR* path, const WINWCHAR* extension);
+extern WINCHAR* PathAddBackslashA(WINCHAR* path);
+extern WINWCHAR* PathAddBackslashW(WINWCHAR* path);
+extern WINCHAR* PathRemoveBackslashA(WINCHAR* path);
+extern WINWCHAR* PathRemoveBackslashW(WINWCHAR* path);
+extern WINCHAR* PathSkipRootA(const WINCHAR* path);
+extern WINWCHAR* PathSkipRootW(const WINWCHAR* path);
+extern void PathUnquoteSpacesA(WINCHAR* path);
+extern void PathUnquoteSpacesW(WINWCHAR* path);
+extern int32 PathCommonPrefixA(const WINCHAR* file1, const WINCHAR* file2, WINCHAR* path);
+extern int32 PathCommonPrefixW(const WINWCHAR* file1, const WINWCHAR* file2, WINWCHAR* path);
+extern bool PathRelativePathToA(WINCHAR* path, WINCHAR* from, DWORD attributes_from, WINCHAR* to, DWORD attributes_to);
+extern bool PathRelativePathToW(WINWCHAR* path, WINWCHAR* from, DWORD attributes_from, WINWCHAR* to, DWORD attributes_to);
+extern bool PathSearchAndQualifyA(WINCHAR* path, WINCHAR* buffer, WINUINT32 buffer_len);
+extern bool PathSearchAndQualifyW(WINWCHAR* path, WINWCHAR* buffer, WINUINT32 buffer_len);
+extern bool PathUnExpandEnvStringsA(WINCHAR* path, WINCHAR* buffer, WINUINT32 buffer_len);
+extern bool PathUnExpandEnvStringsW(WINWCHAR* path, WINWCHAR* buffer, WINUINT32 buffer_len);
+extern bool PathMakePrettyA(WINCHAR* path);
+extern bool PathMakePrettyW(WINWCHAR* path);
+extern void PathUndecorateA(WINCHAR* path);
+extern void PathUndecorateW(WINWCHAR* path);
+extern int32 PathCchCombine(WINWCHAR* out, WINSIZE out_len, const WINWCHAR* path_in, const WINWCHAR* path_append);
+extern int32 PathCchAppend(WINWCHAR* path, WINSIZE path_len, const WINCHAR* path_append);
+extern int32 PathCchCanonicalize(WINWCHAR* out, WINSIZE out_len, const WINWCHAR* path_in);
+extern int32 PathCchRemoveBackslash(WINWCHAR* path, WINSIZE path_len);
+extern int32 PathCchRemoveFileSpec(WINWCHAR* path, WINSIZE path_len);
+extern int32 PathCchAddExtension(WINWCHAR* path, WINSIZE path_len, const WINWCHAR* extension);
+extern int32 PathCchRemoveExtension(WINWCHAR* path, WINSIZE path_len);
+extern int32 PathCchRenameExtension(WINWCHAR* path, WINSIZE path_len, const WINWCHAR* extension);
+extern int32 PathCchFindExtension(WINWCHAR* path, WINSIZE path_len, const WINWCHAR** extension);
+extern int32 PathCchStripPrefix(WINWCHAR* path, WINSIZE path_len);
+extern int32 PathCchStripToRoot(WINWCHAR* path, WINSIZE path_len);
+extern bool PathCchSkipRoot(const WINWCHAR* path, WINWCHAR** root_end);
+extern bool PathCchIsRoot(const WINWCHAR* path);
+extern bool GetConsoleMode(link console, DWORD* mode);
+extern bool SetConsoleMode(link console, DWORD mode);
+extern DWORD GetFileType(link file);
+extern DWORD GetConsoleOutputCP();
+extern bool SetConsoleOutputCP(DWORD code);
+extern DWORD GetConsoleCP();
+extern bool SetConsoleCp(DWORD code);
+extern bool GetConsoleScreenBufferInfo(link console, link screen_buffer_info);
+extern bool SetConsoleTextAttribute(link console, WORD attributes);
+extern bool WriteConsoleW(link console, link buffer, DWORD char_to_write, DWORD* written, link reserved);
+extern link GetConsoleWindow();
+extern void ExitProcess(WINUINT32 code);
+extern link GetStdHandle(DWORD fd);
+extern bool WriteFile(link file, link buffer, DWORD len, DWORD* written, link overlapped);
+extern bool ReadFile(link file, link buffer, DWORD bytes_to_read, DWORD* readed, link overlapped);
+extern bool WriteConsoleA(link console, link buffer, DWORD char_to_write, DWORD* written, link reserved);
+extern bool ReadConsoleA(link console, link buffer, DWORD char_to_write, DWORD* written, link input_control);
+extern link CreateFileA(char* file_name, FLAGS desired_access, FLAGS share_mode, link security_attributes, DWORD create_disposition, FLAGS attributes, link template);
+extern bool CloseHandle(link fd);
+extern DWORD GetLastError();
+extern link VirtualAlloc(link address, WINSIZE size, DWORD type, DWORD protect);
+extern bool VirtualFree(link address, WINSIZE size, DWORD free_type);
+extern link GetProcessHeap();
+extern link HeapAlloc(link heap, FLAGS flags, WINSIZE dwbytes);
+extern bool HeapFree(link heap, FLAGS flags, link memory);
+extern char* _fullpath(char* buf, char* path, uint64 tam);

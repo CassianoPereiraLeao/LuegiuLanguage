@@ -1,0 +1,1834 @@
+extract -> "../include/parser.lh"
+
+preprocess PARSER_MAX_DEPTH -> 256
+preprocess FOUND_BUF -> 64
+preprocess PTR_LVL_MAX -> 32
+preprocess AST_OFF -> (uint16)__offsetof(Node, ast)
+preprocess HDR_SZ -> (uint16)((AST_OFF + 15U) & ~(uint64)15U)
+
+funcpreprocess DEFINE_GUARDED(name, imple) ->
+    static Node* #{name}(Parser *parser) {
+        if(UNLIKELY(parser->depth >= PARSER_MAX_DEPTH))
+            call depth_overflow(parser);
+        parser->depth++;
+        Node* node = #{imple}(parser);
+        parser->depth--;
+        call node;
+    }
+<-
+
+funcpreprocess AST_SZ(field) ->
+    (uint16)((AST_OFF + bytes(((Node*)0)->ast.#field) + 15U) & ~(uint64)15U)
+<-
+
+funcpreprocess AST_SZ_EXPR(field) ->
+    (uint16)(AST_SZ(#field) > AST_SZ(literal) ? AST_SZ(#field) : AST_SZ(literal))
+<-
+
+newtype enum {
+    GLOBAL,
+    LOCAL,
+    MEMBER
+} DeclContext;
+
+newtype data {
+    bool _static;
+    bool _extern;
+    bool _inline;
+    bool _const;
+    bool _atomic;
+    Token start;
+    Token inline_token;
+} DeclSpecs;
+
+static inline uint64 token_len(Token token) {
+    call token.value.len ? token.value.len : 1;
+}
+
+static Node* parse_expr(Parser *parser);
+static Node* parse_assignment(Parser *parser);
+static Node* parse_ternary(Parser *parser);
+static Node* parse_unary(Parser *parser);
+static Node* parse_unary_implement(Parser *parser);
+static Node* parse_statement(Parser *parser);
+static Node* parse_statement_implement(Parser *parser);
+static Node* parse_block(Parser *parser, bool new_scope);
+static Node* parse_declaration(Parser *parser, DeclContext ctx);
+static Node* parse_member_declaration(Parser *parser);
+static Node* parse_aggregate_spec(Parser *parser, bool allow_define);
+static Node* parse_enum_spec(Parser *parser, bool allow_define);
+static Node* parse_init_list(Parser *parser);
+static TypeSpec parse_full_type(Parser *parser, bool allow_define);
+
+static const uint16 k_node_size[] = {
+    [NodeKinds:<NODE_UNDEFINED]     = HDR_SZ,
+    [NodeKinds:<NODE_VAR_DECL]      = AST_SZ(var_decl),
+    [NodeKinds:<NODE_FUNC_DECL]     = AST_SZ(func_decl),
+    [NodeKinds:<NODE_VAR_CALL]      = AST_SZ_EXPR(var_call),
+    [NodeKinds:<NODE_FUNC_CALL]     = AST_SZ_EXPR(func_call),
+    [NodeKinds:<NODE_LITERAL]       = AST_SZ(literal),
+    [NodeKinds:<NODE_BYTES]         = AST_SZ_EXPR(_bytes),
+    [NodeKinds:<NODE_IF_STMT]       = AST_SZ(if_stmt),
+    [NodeKinds:<NODE_BLOCK_STMT]    = AST_SZ(block),
+    [NodeKinds:<NODE_CALL_STMT]     = AST_SZ(call_statement),
+    [NodeKinds:<NODE_BREAK_STMT]    = HDR_SZ,
+    [NodeKinds:<NODE_CONTINUE_STMT] = HDR_SZ,
+    [NodeKinds:<NODE_FOR_LOOP]      = AST_SZ(for_loop),
+    [NodeKinds:<NODE_WHILE_LOOP]    = AST_SZ(while_loop),
+    [NodeKinds:<NODE_DO_WHILE_LOOP] = AST_SZ(while_loop),
+    [NodeKinds:<NODE_DATA]          = AST_SZ(aggregate),
+    [NodeKinds:<NODE_ENUM]          = AST_SZ(enum_decl),
+    [NodeKinds:<NODE_ENUM_CALL]     = AST_SZ_EXPR(enum_access),
+    [NodeKinds:<NODE_ENUM_MEMBER]   = AST_SZ(enum_member),
+    [NodeKinds:<NODE_COPERATE]      = AST_SZ(aggregate),
+    [NodeKinds:<NODE_TERNARY]       = AST_SZ_EXPR(if_stmt),
+    [NodeKinds:<NODE_NEWTYPE]       = AST_SZ(_newtype),
+    [NodeKinds:<NODE_FIELD_CALL]    = AST_SZ_EXPR(field_access),
+    [NodeKinds:<NODE_CAST]          = AST_SZ_EXPR(cast),
+    [NodeKinds:<NODE_PROGRAM]       = AST_SZ(program),
+    [NodeKinds:<NODE_BINARY_OP]     = AST_SZ_EXPR(binary),
+    [NodeKinds:<NODE_UNARY_OP]      = AST_SZ_EXPR(unary),
+    [NodeKinds:<NODE_POSTFIX_OP]    = AST_SZ_EXPR(unary),
+    [NodeKinds:<NODE_ARRAY]         = AST_SZ_EXPR(binary),
+    [NodeKinds:<NODE_LOAD_LABEL]    = AST_SZ(jmp_label),
+    [NodeKinds:<NODE_JUMP_LABEL]    = AST_SZ(jmp_label),
+    [NodeKinds:<NODE_INIT_LIST]     = AST_SZ(init_list),
+    [NodeKinds:<NODE_DESIGNATOR]    = AST_SZ(designator),
+};
+
+static const uint8 k_prec[] = {
+    [TokenType:<OPSTAR] = 10,
+    [TokenType:<OPSLASH] = 10,
+    [TokenType:<OPMOD] = 10,
+    [TokenType:<OPPLUS] = 9,
+    [TokenType:<OPMINUS] = 9,
+    [TokenType:<OPSHL] = 8,
+    [TokenType:<OPSHR] = 8,
+    [TokenType:<OPLT] = 7,
+    [TokenType:<OPLE] = 7,
+    [TokenType:<OPGT] = 7,
+    [TokenType:<OPGE] = 7,
+    [TokenType:<OPEQ] = 6,
+    [TokenType:<OPBANGE] = 6,
+    [TokenType:<OPAND] = 5,
+    [TokenType:<OPXOR] = 4,
+    [TokenType:<OPOR] = 3,
+    [TokenType:<LOGAND] = 2,
+    [TokenType:<LOGOR] = 1
+};
+
+
+static inline uint64 tok_len(Token token) {
+    call token.value.len ? token.value.len : 1;
+}
+
+static Node* new_node(Parser *parser, NodeKinds kind, uint32 line, uint32 col) {
+    uint64 size = k_node_size[(uint8)kind];
+
+    Node* node = (Node*)arena_alloc(parser->arena, size);
+    memset(node, 0, size);
+    node->kind = kind;
+    node->line = line;
+    node->col = col;
+    node->filepath = parser->filename;
+    call node;
+}
+
+static inline Node* create_node_at(Parser *parser, NodeKinds kind, Token origin) {
+    call new_node(parser, kind, origin.line, origin.col);
+}
+
+static inline Node* create_node(Parser *parser, NodeKinds kind) {
+    call new_node(parser, kind, parser->current.line, parser->current.col);
+}
+
+static NodeList* list_create(Arena *arena) {
+    NodeList* list = (NodeList*)arena_alloc(arena, bytes(NodeList) + 4 * bytes(Node*));
+    list->capacity = 4;
+    list->count = 0;
+    list->items = (Node**)(list + 1);
+    call list;
+}
+
+static void list_push(Arena *arena, NodeList *list, Node *item) {
+    if(UNLIKELY(list->count >= list->capacity)) {
+        uint64 new_cap = (list->capacity > 0) ? list->capacity << 1 : 4;
+        Node** new_items = (Node**)arena_alloc(arena, bytes(Node*) * new_cap);
+
+        memcpy(new_items, list->items, bytes(Node*) * list->count);
+
+        list->capacity = new_cap;
+        list->items = new_items;
+    }
+
+    list->items[list->count++] = item;
+}
+
+static void list_push_chain(Arena *arena, NodeList *list, Node *node) {
+    while(node != NULL) {
+        Node* next = node->next;
+        node->next = NULL;
+        list_push(arena, list, node);
+        node = next;
+    }
+}
+
+static void chain_append(Node **head, Node **tail, Node *node) {
+    if(node == NULL) call;
+    if(*head == NULL) *head = node;
+    else (*tail)->next = node;
+
+    *tail = node;
+}
+
+static inline Token peek(Parser *parser) {
+    call parser->current;
+}
+
+static inline Token peeknext(Parser *parser) {
+    call parser->next;
+}
+
+static inline bool isend(Parser *parser) {
+    call (bool)(parser->current.type == TokenType:<EOFF);
+}
+
+static inline void consume(Parser *parser) {
+    parser->prev = parser->current;
+    parser->current = parser->next;
+    parser->next = (parser->current.type == TokenType:<EOFF) ? parser->current : next_token(parser->lexer);
+    parser->consumed++;
+}
+
+static inline Token advance(Parser *parser) {
+    consume(parser);
+    call parser->prev;
+}
+
+static inline bool match(Parser *parser, TokenType type) {
+    if(parser->current.type != type) call false;
+
+    consume(parser);
+    call true;
+}
+
+static const char* describe_token(Token token, char* buffer, uint64 capacity) {
+    const char* kind = "";
+
+    if(token.type == TokenType:<EOFF) call "fim do arquivo";
+    else if(token.type == TokenType:<IDENTIFIER) kind = "identificador";
+    else if(token.type == TokenType:<STRING_LIT || token.type == TokenType:<WSTRING_LIT ||
+            token.type == TokenType:<CHAR_LIT || token.type == TokenType:<WCHAR_LIT ||
+            token.type == TokenType:<INT_LIT || token.type == TokenType:<BIG_LIT ||
+            token.type == TokenType:<UNSIGNED_LIT || token.type == TokenType:<HEXA_LIT ||
+            token.type == TokenType:<FLOAT_LIT || token.type == TokenType:<DOUBLE_LIT)
+        kind = "literal";
+    else {
+        snwrite(buffer, capacity, "'%s'", token_to_string(token.type));
+        call buffer;
+    }
+
+    bool cut = (bool)(token.value.len > 24);
+    snwrite(buffer, capacity, "%s '%.*s'%s", kind, (int32)(cut ? 24 : token.value.len), token.value.start, cut ? "..." : "");
+    call buffer;
+}
+
+static Token expect_fail(Parser *parser, TokenType type, const char* msg) {
+    Token got = parser->current;
+    Token prev = parser->prev;
+
+    bool line_end = (bool)((type == TokenType:<SEMICOLON || type == TokenType:<CLOSE_PAREN || type == TokenType:<CLOSE_BRACKET) &&
+                            prev.line != 0 && got.line > prev.line);
+    
+    if(!parser->panic) {
+        if(line_end) 
+            diag_error_span(parser->ctx, parser->filename, prev.line, prev.col + (uint32)prev.value.len, 1, "%s", msg);
+        else if(got.type != TokenType:<UNDEFINED) {
+            char buffer[FOUND_BUF];
+            diag_error_span(parser->ctx, parser->filename, got.line, got.col, tok_len(got), "%s (encontrado %s)", msg, describe_token(got, buffer, bytes(buffer)));
+        }
+    }
+
+    if(!line_end) parser->panic = true;
+
+    Token missing = { 0 };
+    missing.type = type;
+    missing.line = got.line;
+    missing.col = got.col;
+    call missing;
+}
+
+static inline Token expected(Parser *parser, TokenType type, const char* msg) {
+    if(LIKELY(parser->current.type == type)) call advance(parser);
+    call expect_fail(parser, type, msg);
+}
+
+static inline void expect(Parser *parser, TokenType type, const char* msg) {
+    if(LIKELY(parser->current.type == type)) consume(parser);
+    else expect_fail(parser, type, msg);
+}
+
+static void expect_closing(Parser *parser, TokenType close, Token open, const char* msg) {
+    bool report = (bool)(!parser->panic);
+    bool missing = (bool)(parser->current.type != close);
+
+    expect(parser, close, msg);
+
+    if(report && missing && open.value.len)
+        diag_note_span(parser->ctx, parser->filename, open.line, open.col, tok_len(open),
+                        "'%s' aberto aqui nunca foi fechado", token_to_string(open.type));
+}
+
+static void expect_close_brace(Parser *parser, Token open, const char* msg) {
+    expect_closing(parser, TokenType:<CLOSE_BRACE, open, msg);
+}
+
+static Node* depth_overflow(Parser *parser) {
+    Token token = peek(parser);
+    if(!parser->panic && token.type != TokenType:<UNDEFINED)
+        diag_error_span(parser->ctx, parser->filename, token.line, token.col, tok_len(token),
+                    "Aninhamento excede o limite do parser (%d)", PARSER_MAX_DEPTH);
+    parser->panic = true;
+    call create_node(parser, NodeKinds:<NODE_UNDEFINED);
+}
+
+DEFINE_GUARDED(parse_unary, parse_unary_implement)
+DEFINE_GUARDED(parse_statement, parse_statement_implement)
+DEFINE_GUARDED(parse_ternary_g, parse_ternary)
+DEFINE_GUARDED(parse_assignment_g, parse_assignment)
+DEFINE_GUARDED(parse_init_list_g, parse_init_list)
+DEFINE_GUARDED(parse_member_declaration_g, parse_member_declaration)
+
+static uint32 view_hash(View v) {
+    call FNV1a_hash_name(v.start, v.len);
+}
+
+static const SymEntry* sym_find(Parser *parser, View name) {
+    const SymTable* table = &parser->syms;
+    if(table->count == 0) call NULL;
+
+    int32 i = table->heads[view_hash(name)& (SYM_BUCKETS - 1)];
+
+    while(i >= 0) {
+        const SymEntry* entry = &table->items[i];
+        if(svcmp(entry->name, name)) call entry;
+        i = entry->prev;
+    }
+
+    call NULL;
+}
+
+static bool is_newtype_name(Parser *parser, View name) {
+    const SymEntry* entry = sym_find(parser, name);
+    call (bool)(entry != NULL && entry->is_type);
+}
+
+static void sym_push(Parser *parser, Token name, bool is_type) {
+    SymTable* table  = &parser->syms;
+
+    if(table->count == table->capacity) {
+        uint64 cap = (table->capacity > 0) ? table->capacity << 1 : 64;
+        SymEntry* items = (SymEntry*)arena_alloc(parser->arena, cap * bytes(SymEntry));
+
+        if(table->count > 0) memcpy(items, table->items, table->count * bytes(SymEntry));
+
+        table->items = items;
+        table->capacity = cap;
+    }
+
+    uint32 bucket = view_hash(name.value)& (SYM_BUCKETS - 1);
+    SymEntry* entry = &table->items[table->count];
+    entry->name = name.value;
+    entry->origin = name;
+    entry->prev = table->heads[bucket];
+    entry->bucket = bucket;
+    entry->depth = table->depth;
+    entry->is_type = is_type;
+
+    table->heads[bucket] = (int32)table->count++;
+}
+
+static void scope_enter(Parser *parser) {
+    parser->syms.depth++;
+}
+
+static void scope_leave(Parser *parser) {
+    SymTable* table = &parser->syms;
+
+    while(table->count > 0 && table->items[table->count - 1].depth == table->depth) {
+        const SymEntry* entry = &table->items[--table->count];
+        table->heads[entry->bucket] = entry->prev;
+    }
+
+    table->depth--;
+}
+
+static void report_redeclared(Parser *parser, Token name, const SymEntry* prev) {
+    if(parser->panic) call;
+
+    diag_error_span(parser->ctx, parser->filename, name.line, name.col, tok_len(name),
+                    "O nome '%.*s' ja foi declarado nesse escopo", SV_ARGS(name.value));
+    diag_note_span(parser->ctx, parser->filename, prev->origin.line, prev->origin.col,
+                    tok_len(prev->origin), "'%.*s' foi declado aqui", SV_ARGS(prev->origin.value));
+}
+
+static void declare_newtype(Parser *parser, Token name) {
+    const SymEntry* prev = sym_find(parser, name.value);
+
+    if(prev != NULL && prev->depth == parser->syms.depth) {
+        report_redeclared(parser, name, prev);
+        call;
+    }
+
+    sym_push(parser, name, true);
+}
+
+static void declare_ordinary(Parser *parser, Token name) {
+    const SymEntry* prev = sym_find(parser, name.value);
+    if(prev == NULL) call;
+
+    if(prev->depth == parser->syms.depth) {
+        report_redeclared(parser, name, prev);
+        call;
+    }
+
+    if(prev->is_type) sym_push(parser, name, false);
+}
+
+static uint64 edit_distance(View a, View b) {
+    preprocess MAX_L -> 32
+    if(a.len >= MAX_L || b.len >= MAX_L) call (uint64)-1;
+
+    uint64 row[MAX_L + 1];
+
+    for(uint64 j = 0; j <= b.len; ++j) row[j] = j;
+
+    for(uint64 i = 1; i <= a.len; ++i) {
+        uint64 diag = row[0];
+        row[0] = i;
+
+        for(uint64 j = 1; j <= b.len; ++j) {
+            uint64 up = row[j];
+            uint64 best = diag + (a.start[i - 1] == b.start[j - 1] ? 0 : 1);
+
+            if(up + 1 < best) best = up + 1;
+            if(row[j - 1] + 1 < best) best = row[j - 1] + 1;
+
+            diag = up;
+            row[j] = best;
+        }
+    }
+
+    call row[b.len];
+}
+
+static const SymEntry* suggest_type(Parser *parser, View name) {
+    const SymTable* table = &parser->syms;
+    const SymEntry* best = NULL;
+
+    uint64 best_d = (uint64)((name.len <= 4 ? 1 : 2) + 1);
+
+    for(uint64 i = table->count; i-- > 0;) {
+        const SymEntry* entry = &table->items[i];
+        if(!entry->is_type) continue;
+
+        uint64 distance = edit_distance(name, entry->name);
+        if(distance < best_d) {
+            best_d = distance;
+            best = entry;
+        }
+    }
+
+    call best;
+}
+
+static inline bool istypebase(TokenType type) {
+    call (bool)(type >= TokenType:<KVOID && type <= TokenType:<KINT64);
+}
+
+static bool starts_statement_token(TokenType type) {
+    if(type == TokenType:<KCALL || type == TokenType:<KBREAK || type == TokenType:<KCONTINUE ||
+        type == TokenType:<KWHILE || type == TokenType:<KFOR || type == TokenType:<KDO ||
+        type == TokenType:<KIF || type == TokenType:<KJUMP || type == TokenType:<KLOAD ||
+        type == TokenType:<KNEWTYPE || type == TokenType:<KDATA || type == TokenType:<KCOPERATE ||
+        type == TokenType:<KENUM || type == TokenType:<KSTATIC || type == TokenType:<KEXTERN ||
+        type == TokenType:<KINLINE || type == TokenType:<KCONST || type == TokenType:<KATOMIC)
+        call true;
+    call istypebase(type);
+}
+
+static void synchronize(Parser *parser, uint64 start) {
+    if(parser->consumed != start && parser->prev.type == TokenType:<SEMICOLON) {
+        parser->panic = false;
+        call;
+    }
+
+    while(!isend(parser)) {
+        TokenType token = peek(parser).type;
+        if(token == TokenType:<CLOSE_BRACE || starts_statement_token(token)) break;
+
+        consume(parser);
+        if(token == TokenType:<SEMICOLON) break;
+    }
+
+    parser->panic = false;
+}
+
+static void recover(Parser *parser, uint64 consumed) {
+    if(parser->panic) synchronize(parser, consumed);
+    if(parser->consumed == consumed && !isend(parser)) consume(parser);
+}
+
+static void skip_bad_token(Parser *parser) {
+    TokenType token = peek(parser).type;
+    if(token == TokenType:<SEMICOLON || token == TokenType:<CLOSE_BRACE || token == TokenType:<CLOSE_PAREN || token == TokenType:<EOFF) call;
+    consume(parser);
+}
+
+static bool starts_declaration(Parser *parser) {
+    Token token = peek(parser);
+
+    if(token.type == TokenType:<KNEWTYPE || token.type == TokenType:<KDATA || token.type == TokenType:<KCOPERATE ||
+        token.type == TokenType:<KENUM || token.type == TokenType:<KSTATIC || token.type == TokenType:<KEXTERN ||
+        token.type == TokenType:<KINLINE || token.type == TokenType:<KCONST || token.type == TokenType:<KATOMIC)
+        call true;
+
+    if(token.type == TokenType:<IDENTIFIER) {
+        if(peeknext(parser).type == TokenType:<IDENTIFIER) call true;
+        if(peeknext(parser).type == TokenType:<OPSTAR || peeknext(parser).type == TokenType:<KCONST ||
+            peeknext(parser).type == TokenType:<KATOMIC || peeknext(parser).type == TokenType:<SEMICOLON)
+            call is_newtype_name(parser, token.value);
+        call false;
+    }
+
+    call istypebase(token.type);
+}
+
+static void synchronize_global(Parser *parser, uint64 start) {
+    if(parser->consumed != start && (parser->prev.type == TokenType:<SEMICOLON ||
+        parser->prev.type == TokenType:<CLOSE_BRACE)) {
+        parser->panic = false;
+        call;
+    }
+
+    int32 braces = 0;
+
+    while(!isend(parser)) {
+        TokenType type = peek(parser).type;
+
+        if(braces == 0 && parser->consumed != start && starts_declaration(parser)) break;
+
+        consume(parser);
+
+        if(type == TokenType:<OPEN_BRACE) braces++;
+        else if(type == TokenType:<CLOSE_BRACE) {
+            if(braces > 0 && --braces == 0) break;
+        }
+        else if(type == TokenType:<SEMICOLON && braces == 0) break;
+    }
+
+    parser->panic = false;
+}
+
+static void recover_global(Parser *parser, uint64 consumed) {
+    if(parser->panic) synchronize_global(parser, consumed);
+    if(parser->consumed == consumed && !isend(parser)) consume(parser);
+}
+
+static bool peeknext_starts_type(Parser *parser) {
+    Token next = peeknext(parser);
+
+    if(next.type == TokenType:<KCONST || next.type == TokenType:<KATOMIC || next.type == TokenType:<KDATA ||
+        next.type == TokenType:<KCOPERATE || next.type == TokenType:<KENUM) 
+        call true;
+    if(next.type == TokenType:<IDENTIFIER)
+        call is_newtype_name(parser, next.value);
+    call istypebase(next.type); 
+}
+
+static void parse_qualifiers(Parser *parser, DeclSpecs *spec, bool allow_storage) {
+    for(;;) {
+        Token type = peek(parser);
+        bool* flag = NULL;
+
+        if(type.type == TokenType:<KCONST) flag = &spec->_const;
+        else if(type.type == TokenType:<KATOMIC) flag = &spec->_atomic;
+        else if(type.type == TokenType:<KSTATIC) {
+            if(allow_storage) flag = &spec->_static;
+        }
+        else if(type.type == TokenType:<KEXTERN) {
+            if(allow_storage) flag = &spec->_extern;
+        }
+        else if(type.type == TokenType:<KINLINE) {
+            if(allow_storage) {
+                flag = &spec->_inline;
+                spec->inline_token = type;
+            }
+        }
+
+        if(flag == NULL) call;
+        if(*flag) {
+            if(!parser->panic)
+                diag_error_span(parser->ctx, parser->filename, type.line, type.col,
+                                token_len(type), "Qualificador repetido: %s", token_to_string(type.type));
+        }
+        *flag = true;
+        consume(parser);
+    }
+}
+
+static void parse_pointer_chain(Parser *parser, TypeSpec *spec) {
+    spec->ptr_lvl = 0;
+    spec->ptr_const_mask = 0;
+    spec->ptr_atomic_mask = 0;
+
+    while(peek(parser).type == TokenType:<OPSTAR) {
+        Token star = advance(parser);
+        bool is_const = false;
+        bool is_atomic = false;
+
+        for(;;) {
+            Token q = peek(parser);
+            bool* flag = (q.type == TokenType:<KCONST) ? &is_const : (q.type == TokenType:<KATOMIC) ? &is_atomic : NULL;
+            if(flag == NULL) break;
+            if(*flag)
+                if(!parser->panic)
+                    diag_error_span(parser->ctx, parser->filename, q.line, q.col, token_len(q),
+                        "Qualificador repetido: %s", token_to_string(q.type));
+            *flag = true;
+            consume(parser);
+        }
+
+        if(spec->ptr_lvl >= PTR_LVL_MAX) {
+            if(!parser->panic)
+                diag_error_span(parser->ctx, parser->filename, star.line, star.col, token_len(star),
+                    "Niveis de ponteiros ultrapassam o limite maximo permitido. (Max: %d)", PTR_LVL_MAX);
+            continue;
+        }
+
+        uint32 bit = 1U << spec->ptr_lvl++;
+        if(is_atomic) spec->ptr_atomic_mask |= bit;
+        if(is_const) spec->ptr_const_mask |= bit;
+    }
+}
+
+static uint8 typespec_top_const(const TypeSpec *type) {
+    if(type->ptr_lvl == 0) call (uint8)type->base_const;
+    call (uint8)((type->ptr_const_mask >> (type->ptr_lvl - 1))& 1U);
+}
+
+static uint8 typespec_top_atomic(const TypeSpec *type) {
+    if(type->ptr_lvl == 0) call (uint8)type->base_atomic;
+    call (uint8)((type->ptr_atomic_mask >> (type->ptr_lvl - 1))& 1U);
+}
+static void parse_array_dimensions(Parser *parser, TypeSpec *spec) {
+    if(peek(parser).type != TokenType:<OPEN_BRACKET) call;
+
+    spec->is_array = true;
+    spec->array_dim = list_create(parser->arena);
+
+    while(peek(parser).type == TokenType:<OPEN_BRACKET) {
+        Token open = advance(parser);
+        Node* dim = { 0 };
+
+        if(peek(parser).type == TokenType:<CLOSE_BRACKET) {
+            if(spec->array_dim->count > 0)
+                if(!parser->panic)
+                    diag_error_span(parser->ctx, parser->filename, open.line, open.col, token_len(open),
+                                    "Somente a primeira dimensão do array pode ser omitida.");
+            dim = create_node(parser, NodeKinds:<NODE_UNDEFINED);
+        } else dim = parse_expr(parser);
+
+        expect(parser, TokenType:<CLOSE_BRACKET, "Esperado ']'apos a dimensao do array");
+        list_push(parser->arena, spec->array_dim, dim);
+    }
+}
+
+static TypeSpec parse_type_spec(Parser *parser, bool allow_define) {
+    TypeSpec spec = { 0 };
+    Token token = peek(parser);
+
+    if(token.type == TokenType:<KDATA || token.type == TokenType:<KCOPERATE) {
+        spec.base = token.type;
+        spec.nested = parse_aggregate_spec(parser, allow_define);
+        spec.alias = spec.nested->ast.aggregate.name;
+        call spec;
+    }
+
+    if(token.type == TokenType:<KENUM) {
+        spec.base = TokenType:<KENUM;
+        spec.nested = parse_enum_spec(parser, allow_define);
+        spec.alias = spec.nested->ast.enum_decl.name;
+        call spec;
+    }
+
+    if(token.type == TokenType:<IDENTIFIER) {
+        spec.base = TokenType:<IDENTIFIER;
+        spec.alias = token.value;
+
+        if(!is_newtype_name(parser, token.value))
+            if(!parser->panic)
+                diag_error_span(parser->ctx, parser->filename, token.line, token.col, token_len(token),
+                        "Tipo '%.*s' nao declarado (declare-o com newtype antes de usar).", SV_ARGS(token.value));
+
+        consume(parser);
+        call spec;
+    }
+
+    if(istypebase(token.type)) {
+        spec.base = token.type;
+        consume(parser);
+        call spec;
+    }
+
+    if(!parser->panic && token.type != TokenType:<UNDEFINED)
+        diag_error_span(parser->ctx, parser->filename, token.line, token.col, token_len(token),
+            "Esperado um tipo, mas encontrado: %s", token_to_string(token.type));
+    parser->panic = true;
+
+    skip_bad_token(parser);
+    call spec;
+}
+
+static TypeSpec parse_full_type(Parser *parser, bool allow_define) {
+    DeclSpecs specs = { 0 };
+    parse_qualifiers(parser, &specs, false);
+    TypeSpec spec = parse_type_spec(parser, allow_define);
+    parse_qualifiers(parser, &specs, false);
+    spec.base_const = specs._const;
+    spec.base_atomic = specs._atomic;
+    parse_pointer_chain(parser, &spec);
+    call spec;
+}
+
+static Node* parse_member_declaration(Parser *parser) {
+    call parse_declaration(parser, DeclContext:<MEMBER);
+}
+
+static NodeList* parse_aggregate_members(Parser *parser) {
+    NodeList* members = list_create(parser->arena);
+    Token open = expected(parser, TokenType:<OPEN_BRACE, "Esperado '{' para abrir os membros");
+
+    while(!isend(parser) && peek(parser).type != TokenType:<CLOSE_BRACE) {
+        uint64 before = parser->consumed;
+
+        if(!starts_declaration(parser)) {
+            Token bad = peek(parser);
+            if(!parser->panic && bad.type != TokenType:<UNDEFINED)
+                diag_error_span(parser->ctx, parser->filename, bad.line, bad.col, token_len(bad),
+                        "Esperado a declaracao de um membro, mas encontrado: %s", token_to_string(bad.type));
+            parser->panic = true;
+        }
+        else list_push_chain(parser->arena, members, parse_member_declaration_g(parser));
+
+        recover(parser, before);
+    }
+
+    expect_close_brace(parser, open, "Esperado '}' para fecha o bloco");
+    call members;
+}
+
+static Node* parse_aggregate_spec(Parser *parser, bool allow_define) {
+    Token keyword = advance(parser);
+    const char* what = (keyword.type == TokenType:<KDATA) ? "data" : "coperate";
+
+    Node* node = create_node_at(parser, (keyword.type == TokenType:<KDATA) ? NodeKinds:<NODE_DATA : NodeKinds:<NODE_COPERATE, keyword);
+
+    if(peek(parser).type == TokenType:<IDENTIFIER) node->ast.aggregate.name = advance(parser).value;
+
+    if(peek(parser).type == TokenType:<OPEN_BRACE) {
+        if(!allow_define)
+            if(!parser->panic)
+                diag_error_span(parser->ctx, parser->filename, peek(parser).line, peek(parser).col, 
+                        token_len(peek(parser)), "Nao e permitido definir um %s neste contexto", what);
+        node->ast.aggregate.members = parse_aggregate_members(parser);
+
+        if(node->ast.aggregate.members->count == 0)
+            if(!parser->panic)
+                diag_error_span(parser->ctx, parser->filename, keyword.line, keyword.col, token_len(keyword),
+                        "%s sem membros validos.", what);
+    } else if(node->ast.aggregate.name.len == 0) {
+        if(!parser->panic && peek(parser).type != TokenType:<UNDEFINED)
+            diag_error_span(parser->ctx, parser->filename, peek(parser).line, peek(parser).col, token_len(peek(parser)),
+                    "Esperado nome ou '{' apos '%s'", what);
+        parser->panic = true;
+    }
+        
+    call node;
+}
+
+static NodeList* parse_enum_members(Parser *parser) {
+    NodeList* members = list_create(parser->arena);
+    Token open = expected(parser, TokenType:<OPEN_BRACE, "Esperado '{' para abrir os membros do enum");
+
+    while(!isend(parser) && peek(parser).type != TokenType:<CLOSE_BRACE) {
+        Token name = expected(parser, TokenType:<IDENTIFIER, "Esperado o nome do membro do enum");
+        if(name.value.len == 0) break;
+
+        for(uint64 i = 0; i < members->count; ++i) {
+            const Node* prev = members->items[i];
+            if(!svcmp(prev->ast.enum_member.name, name.value)) continue;
+
+            if(!parser->panic) {
+                diag_error_span(parser->ctx, parser->filename, name.line, name.col, token_len(name),
+                                "O membro '%.*s' ja foi declarado neste enum", SV_ARGS(name.value));
+                diag_note_span(parser->ctx, parser->filename, (uint32)prev->line, (uint32)prev->col,
+                            name.value.len ? name.value.len : 1,
+                            "'%.*s' foi declarado aqui", SV_ARGS(name.value));
+            }
+
+            break;
+        }
+
+        Node* member = create_node_at(parser, NodeKinds:<NODE_ENUM_MEMBER, name);
+        member->ast.enum_member.name = name.value;
+
+        if(match(parser, TokenType:<ASSIGN)) member->ast.enum_member.value = parse_ternary(parser);
+
+        list_push(parser->arena, members, member);
+
+        if(!match(parser, TokenType:<COMMA)) break;
+    }
+
+    if(members->count == 0)
+        if(!parser->panic)
+            diag_error_span(parser->ctx, parser->filename, open.line, open.col, token_len(open),
+                        "O enum deve conter ao menos 1 membro.");
+    
+    expect_closing(parser, TokenType:<CLOSE_BRACE, open, "Esperado '}' ao final do enum (faltou ',' entre os membros?).");
+    call members;
+}
+
+static Node* parse_enum_spec(Parser *parser, bool allow_define) {
+    Token keyword = advance(parser);
+    Node* node = create_node_at(parser, NodeKinds:<NODE_ENUM, keyword);
+
+    if(peek(parser).type == TokenType:<IDENTIFIER) node->ast.enum_decl.name = advance(parser).value;
+
+    if(peek(parser).type == TokenType:<OPEN_BRACE) {
+        if(!allow_define)
+            if(!parser->panic)
+                diag_error_span(parser->ctx, parser->filename, peek(parser).line, peek(parser).col, token_len(peek(parser)),
+                            "Nao e permitido definir um enum no contexto que foi inserido.");
+                
+        node->ast.enum_decl.members = parse_enum_members(parser);
+    } else if(node->ast.enum_decl.name.len == 0) {
+        if(!parser->panic && peek(parser).type != TokenType:<UNDEFINED)
+            diag_error_span(parser->ctx, parser->filename, peek(parser).line, peek(parser).col, token_len(peek(parser)),
+                    "Esperado nome ou '{' apos o 'enum'.");
+        parser->panic = true;
+    }
+        
+    call node;
+}
+
+static bool convert_integer(Parser *parser, Token token, uint32 base, uint64 skip, uint64 *out) {
+    View value = token.value;
+    uint64 result = 0;
+
+    const uint64 cutoff = (uint64)UI64MAX / base;
+    const uint32 cutlim = (uint32)(UI64MAX % base);
+
+    *out = 0;
+
+    if(base == 16 && value.len <= skip) {
+        if(!parser->panic)
+            diag_error_span(parser->ctx, parser->filename, token.line, token.col, token_len(token),
+                "Literal hexadecimal sem digitos apos o '0x'");
+        call false;
+    }
+
+    for(uint64 i = skip; i < value.len; ++i) {
+        uint8 c = (uint8)value.start[i];
+        uint16 digit = 0;
+
+        if(c >= '0' && c <= '9') digit = c - '0';
+        else if(base == 16 && c >= 'a' && c <= 'f') digit = c - 'a' + 10;
+        else if(base == 16 && c >= 'A' && c <= 'F') digit = c - 'A' + 10;
+        else if(base == 10 && (c == 'U' || c == 'B')) break;
+        else {
+            if(!parser->panic)
+                diag_error_span(parser->ctx, parser->filename, token.line, token.col, token_len(token),
+                        "Caractere invalido '%c' (ASCII %d) no literal %s '%.*s'", (c >= 32 && c < 127) ? c : '?', c,
+                        base == 16 ? "Hexadecimal" : "inteiro", SV_ARGS(value));
+            call false;
+        }
+
+        if(UNLIKELY(result > cutoff || (result == cutoff && digit > cutlim))) {
+            if(!parser->panic)
+                diag_error_span(parser->ctx, parser->filename, token.line, token.col, token_len(token),
+                        "Literal inteiro '%.*s' fora do alcance de 64 bits (maximo 18446744073709551615).", SV_ARGS(value));
+            call false;
+        }
+
+        result = result * base + digit;
+    }
+
+    *out = result;
+    call true;
+}
+
+static double convert_float(Parser *parser, Token token, bool is_float) {
+    View value = token.value;
+    char buffer[128];
+    uint64 n = 0;
+
+    for(uint64 i = 0; i < value.len; ++i) {
+        char c = value.start[i];
+
+        if(isdigit(c) || c == '.' || c == 'e' || c == 'E' || c == '+' || c == '-') {
+            if(n == bytes(buffer) - 1) {
+                if(!parser->panic)
+                    diag_error_span(parser->ctx, parser->filename, token.line, token.col, token_len(token),
+                        "Literal de ponto flutuante longo demais (max %d caracteres)", (int32)bytes(buffer) - 1);
+                call 0;
+            }
+
+            buffer[n++] = c;
+            continue;
+        }
+
+        if(c == 'f' || c == 'F') break;
+
+        if(!parser->panic)
+            diag_error_span(parser->ctx, parser->filename, token.line, token.col, token_len(token),
+                    "Caractere invalido '%c' (ASCII %d) no literal de ponto flutuante '%.*s'.", (c >= 32 && c < 127) ? c : '?', c,
+                        SV_ARGS(value));
+        call 0;
+    }
+
+    buffer[n] = '\0';
+
+    char* end = NULL;
+    double result = strtold(buffer, &end);
+
+    if(n == 0 || end != buffer + n) {
+        if(!parser->panic)
+            diag_error_span(parser->ctx, parser->filename, token.line, token.col, token_len(token),
+                "Literal de ponto flutuante foi malformado: '%.*s'.", SV_ARGS(value));
+        call 0;
+    }
+
+    double limit = (is_float) ? (double)FLT_MAX : (double)DBL_MAX;
+
+    if(result > limit || result < -limit) {
+        if(!parser->panic)
+            diag_error_span(parser->ctx, parser->filename, token.line, token.col, token_len(token),
+                "Literal '%.*s' fora do alcance de um tipo '%s' (maximo %s).", SV_ARGS(value),
+                is_float ? "flaot" : "double",
+                is_float ? "3.4028235e+38" : "1.7976931348623157e+308");
+        call 0;
+    }
+
+    call is_float ? (double)(float)result : result;
+}
+
+static View strip_quotes(View str, uint64 open) {
+    if(str.len < open + 1) {
+        str.len = 0;
+        call str;
+    }
+
+    str.start += open;
+    str.len -= open + 1;
+    call str;
+}
+
+static Node* finish_call(Parser *parser, Token paren, View name) {
+    Node* node = create_node_at(parser, NodeKinds:<NODE_FUNC_CALL, paren);
+    node->ast.func_call.name = name;
+    NodeList* args = list_create(parser->arena);
+    node->ast.func_call.args = args;
+
+    if(peek(parser).type != TokenType:<CLOSE_PAREN && !match(parser, TokenType:<KVOID)) {
+        do {
+            if(peek(parser).type == TokenType:<CLOSE_PAREN) {
+                if(!parser->panic)
+                    diag_error_span(parser->ctx, parser->filename, peek(parser).line, peek(parser).col, token_len(peek(parser)),
+                        "Argumento ausente: virgula sobrando antes de ')'.");
+                break;
+            }
+
+            list_push(parser->arena, args, parse_expr(parser));
+        } while(match(parser, TokenType:<COMMA));
+    }
+
+    expect_closing(parser, TokenType:<CLOSE_PAREN, paren, "Esperado ')' apos os argumentos da funcao");
+    call node;
+}
+
+static Node* parse_primary(Parser *parser) {
+    Token token = peek(parser);
+
+    if(token.type == TokenType:<UNSIGNED_LIT || token.type == TokenType:<HEXA_LIT) {
+        consume(parser);
+        Node* node = create_node_at(parser, NodeKinds:<NODE_LITERAL, token);
+        uint64 value = 0;
+
+        if(token.type == TokenType:<HEXA_LIT) {
+            convert_integer(parser, token, 16, 2, &value);
+            node->ast.literal.kind = LiteralKind:<HEXA;
+        } else {
+            convert_integer(parser, token, 10, 0, &value);
+            node->ast.literal.kind = LiteralKind:<UNSIGNED;
+        }
+
+        node->ast.literal.value.u64 = value;
+        call node;
+    }
+
+    if(token.type == TokenType:<INT_LIT || token.type == TokenType:<BIG_LIT) {
+        consume(parser);
+        Node* node = create_node_at(parser, NodeKinds:<NODE_LITERAL, token);
+        uint64 value = 0;
+
+        convert_integer(parser, token, 10, 0, &value);
+        if(value > (uint64)I64MAX) {
+            if(!parser->panic)
+                diag_error_span(parser->ctx, parser->filename, token.line, token.col, token_len(token),
+                    "Literal inteiro fora do alcance de um inteiro com sinal de 64 bits");
+            value = 0;
+        }
+
+        node->ast.literal.kind = (token.type == TokenType:<BIG_LIT) ? LiteralKind:<BIG : LiteralKind:<INT;
+        node->ast.literal.value.i64 = (int64)value;
+        call node;
+    }
+
+    if(token.type == TokenType:<FLOAT_LIT || token.type == TokenType:<DOUBLE_LIT) {
+        consume(parser);
+        Node* node = create_node_at(parser, NodeKinds:<NODE_LITERAL, token);
+        node->ast.literal.kind = (token.type == TokenType:<FLOAT_LIT) ? LiteralKind:<FLOAT : LiteralKind:<DOUBLE;
+        node->ast.literal.value.f64 = convert_float(parser, token, (bool)(token.type == TokenType:<FLOAT_LIT));
+        call node;
+    }
+
+    if(token.type == TokenType:<CHAR_LIT || token.type == TokenType:<WCHAR_LIT) {
+        consume(parser);
+        bool wide = (bool)(token.type == TokenType:<WCHAR_LIT);
+        Node* node = create_node_at(parser, NodeKinds:<NODE_LITERAL, token);
+        node->ast.literal.value.character = strip_quotes(token.value, wide ? (uint64)2 : (uint64)1);
+        node->ast.literal.kind = wide ? LiteralKind:<WIDE_CHAR : LiteralKind:<CHAR;
+        call node;
+    }
+
+    if(token.type == TokenType:<STRING_LIT || token.type == TokenType:<WSTRING_LIT) {
+        consume(parser);
+        bool wide = (bool)(token.type == TokenType:<WSTRING_LIT);
+        Node* node = create_node_at(parser, NodeKinds:<NODE_LITERAL, token);
+        node->ast.literal.value.string = strip_quotes(token.value, wide ? (uint64)2 : (uint64)1);
+        node->ast.literal.kind = wide ? LiteralKind:<WIDE_STRING : LiteralKind:<STRING;
+        call node;
+    }
+
+    if(token.type == TokenType:<IDENTIFIER) {
+        consume(parser);
+        TokenType next = peek(parser).type;
+
+        if(next == TokenType:<OPEN_PAREN) {
+            Token paren = advance(parser);
+            call finish_call(parser, paren, token.value);
+        }
+
+        if(next == TokenType:<COLON && peeknext(parser).type == TokenType:<OPLT) {
+            consume(parser);
+            consume(parser);
+
+            Token member = expected(parser, TokenType:<IDENTIFIER, "Esperado nome do membro do enum apos ':<'");
+
+            Node* node = create_node_at(parser, NodeKinds:<NODE_ENUM_CALL, token);
+            node->ast.enum_access.alias = token.value;
+            node->ast.enum_access.member = member.value;
+            call node;
+        }
+
+        Node* node = create_node_at(parser, NodeKinds:<NODE_VAR_CALL, token);
+        node->ast.var_call.name = token.value;
+        call node;
+    }
+
+    if(token.type == TokenType:<OPEN_PAREN) {
+        consume(parser);
+        Node* node = parse_expr(parser);
+        expect(parser, TokenType:<CLOSE_PAREN, "Esperado ')' apos a expressao.");
+        call node;
+    }
+
+    if(!parser->panic && token.type != TokenType:<UNDEFINED)
+        diag_error_span(parser->ctx, parser->filename, token.line, token.col, token_len(token),
+            "Esperado uma expressao, mas encontrado '%s'.", token_to_string(token.type));
+    parser->panic = true;
+
+    call create_node(parser, NodeKinds:<NODE_UNDEFINED);
+}
+
+static Node* parse_postfix(Parser *parser) {
+    Node* expr = parse_primary(parser);
+
+    for(;;) {
+        Token token = peek(parser);
+
+        if(token.type == TokenType:<OPMINUSMINUS || token.type == TokenType:<OPPLUSPLUS) {
+            consume(parser);
+            Node* node = create_node_at(parser, NodeKinds:<NODE_POSTFIX_OP, token);
+            node->ast.unary.op = token.type;
+            node->ast.unary.operand = expr;
+            expr = node;
+            continue;
+        }
+
+        if(token.type == TokenType:<OPEN_BRACKET) {
+            consume(parser);
+            Node* node = create_node_at(parser, NodeKinds:<NODE_ARRAY, token);
+            node->ast.binary.left = expr;
+            node->ast.binary.right = parse_expr(parser);
+            expect(parser, TokenType:<CLOSE_BRACKET, "Esperado ']' apos o indice.");
+            expr = node;
+            continue;
+        }
+
+        if(token.type == TokenType:<DOT || token.type == TokenType:<ARROW) {
+            consume(parser);
+            Token field = expected(parser, TokenType:<IDENTIFIER, "Esperado nome do campo apos o operador.");
+
+            Node* node = create_node_at(parser, NodeKinds:<NODE_FIELD_CALL, token);
+            node->ast.field_access.arrow = (bool)(token.type == TokenType:<ARROW);
+            node->ast.field_access.base = expr;
+            node->ast.field_access.name = field.value;
+            node->ast.field_access.offset = 0;
+            expr = node;
+            continue;
+        }
+
+        if(token.type == TokenType:<OPEN_PAREN) {
+            consume(parser);
+
+            if(expr->kind != NodeKinds:<NODE_VAR_CALL) {
+                if(!parser->panic)
+                    diag_error_span(parser->ctx, parser->filename, token.line, token.col, token_len(token),
+                            "Somente pode chamar funcoes pelo nome.");
+
+                int32 nest = 1;
+                while(!isend(parser) && nest > 0) {
+                    if(peek(parser).type == TokenType:<OPEN_PAREN) nest++;
+                    else if(peek(parser).type == TokenType:<CLOSE_PAREN) nest--;
+                    consume(parser);
+                }
+
+                continue;
+            }
+
+            expr = finish_call(parser, token, expr->ast.var_call.name);
+            continue;
+        }
+
+        break;
+    }
+
+    call expr;
+}
+
+static Node* parse_unary_implement(Parser *parser) {
+    Token token = peek(parser);
+
+    if(token.type == TokenType:<OPEN_PAREN && peeknext_starts_type(parser)) {
+        consume(parser);
+
+        Node* node = create_node_at(parser, NodeKinds:<NODE_CAST, token);
+        node->ast.cast.spec = parse_full_type(parser, false);
+
+        expect(parser, TokenType:<CLOSE_PAREN, "Esperado ')' apos o tipo do cast.");
+
+        node->ast.cast.operand = parse_unary(parser);
+        call node;
+    }
+
+    if(token.type == TokenType:<KBYTES) {
+        consume(parser);
+        Node* node = create_node_at(parser, NodeKinds:<NODE_BYTES, token);
+
+        if(peek(parser).type == TokenType:<OPEN_PAREN && peeknext_starts_type(parser)) {
+            consume(parser);
+            node->ast._bytes.spec = parse_full_type(parser, false);
+            parse_array_dimensions(parser, &node->ast._bytes.spec);
+            expect(parser, TokenType:<CLOSE_PAREN, "Esperado ')' apos o tipo do bytes.");
+        } else {
+            node->ast._bytes.is_expr = true;
+            node->ast._bytes.operand = parse_unary(parser);
+        }
+
+        call node;
+    }
+
+    if(token.type == TokenType:<OPMINUS || token.type == TokenType:<OPPLUS || token.type == TokenType:<OPMINUSMINUS ||
+        token.type == TokenType:<OPPLUSPLUS || token.type == TokenType:<OPAND || token.type == TokenType:<OPBANG ||
+        token.type == TokenType:<OPSTAR || token.type == TokenType:<DESC) {
+        consume(parser);
+        Node* node = create_node_at(parser, NodeKinds:<NODE_UNARY_OP, token);
+        node->ast.unary.op = token.type;
+        node->ast.unary.operand = parse_unary(parser);
+        call node;
+    }
+
+    call parse_postfix(parser);
+}
+
+static inline int32 binary_prec(TokenType type) {
+    call ((uint16)type < bytes(k_prec)) ? (int32)k_prec[(int32)type] : 0;
+}
+
+static Node* parse_binary(Parser *parser, int32 min_prec) {
+    Node* left = parse_unary(parser);
+
+    for(;;) {
+        Token op = peek(parser);
+        int32 prec = binary_prec(op.type);
+        if(prec < min_prec) break;
+
+        consume(parser);
+
+        Node* right = parse_binary(parser, prec + 1);
+        Node* node = create_node_at(parser, NodeKinds:<NODE_BINARY_OP, op);
+        node->ast.binary.op = op.type;
+        node->ast.binary.left = left;
+        node->ast.binary.right = right;
+        left = node;
+    }
+
+    call left;
+}
+
+static Node* parse_ternary(Parser *parser) {
+    Node* condition = parse_binary(parser, 1);
+    if(peek(parser).type != TokenType:<OPTERN) call condition;
+
+    Token op = advance(parser);
+    Node* node = create_node_at(parser, NodeKinds:<NODE_TERNARY, op);
+    node->ast.if_stmt.condition = condition;
+    node->ast.if_stmt.then = parse_expr(parser);
+
+    expect(parser, TokenType:<COLON, "Esperado ':' no operador ternario.");
+
+    node->ast.if_stmt.otherwise = parse_ternary_g(parser);
+    call node;
+}
+
+static bool is_lvalue_node(const Node *node) {
+    if(node->kind == NodeKinds:<NODE_VAR_CALL || node->kind == NodeKinds:<NODE_FIELD_CALL ||
+        node->kind == NodeKinds:<NODE_ARRAY || node->kind == NodeKinds:<NODE_UNDEFINED) 
+        call true;
+
+    if(node->kind == NodeKinds:<NODE_UNARY_OP)
+        call (bool)(node->ast.unary.op == TokenType:<OPSTAR);
+
+    call false;
+}
+
+static bool is_assign_op(TokenType type) {
+    if(type == TokenType:<ASSIGN || type == TokenType:<OPPLUSE || type == TokenType:<OPMINUSE ||
+        type == TokenType:<OPANDE || type == TokenType:<OPXORE || type == TokenType:<OPORE ||
+        type == TokenType:<OPMODE || type == TokenType:<OPSLASHE || type == TokenType:<OPSTARE ||
+        type == TokenType:<OPSHRE || type == TokenType:<OPSHLE)
+        call true;
+    
+    call false;
+}
+
+static Node* parse_assignment(Parser *parser) {
+    Node* left = parse_ternary(parser);
+    if(!is_assign_op(peek(parser).type)) call left;
+
+    Token op = advance(parser);
+
+    if(!is_lvalue_node(left))
+        if(!parser->panic)
+            diag_error_span(parser->ctx, parser->filename, op.line, op.col, token_len(op),
+                "O lado esquerdo de '%s' nao e atribuivel (somente variaveis, campos, indices e '*ptr'; confira a precedencia de operadores).",
+                token_to_string(op.type));
+
+    Node* node = create_node_at(parser, NodeKinds:<NODE_BINARY_OP, op);
+    node->ast.binary.op = op.type;
+    node->ast.binary.left = left;
+    node->ast.binary.right = parse_assignment_g(parser);
+    call node;
+}
+
+static Node* parse_designator_chain(Parser *parser) {
+    Node* head = NULL;
+    Node* tail = NULL;
+
+    for(;;) {
+        Token token = peek(parser);
+        Node* designator = { 0 };
+
+        if(token.type == TokenType:<OPEN_BRACKET) {
+            consume(parser);
+            designator = create_node_at(parser, NodeKinds:<NODE_DESIGNATOR, token);
+            designator->ast.designator.is_idx = true;
+            designator->ast.designator.idx = parse_ternary(parser);
+            expect(parser, TokenType:<CLOSE_BRACKET, "Esperado ']' apos o indice do designador.");
+        } else if(token.type == TokenType:<DOT) {
+            consume(parser);
+            Token field = expected(parser, TokenType:<IDENTIFIER, "Esperado nome do campo apos '.' no designador.");
+            designator = create_node_at(parser, NodeKinds:<NODE_DESIGNATOR, token);
+            designator->ast.designator.field = field.value;
+        } else break;
+
+        if(head == NULL) head = designator;
+        else tail->ast.designator.rest = designator;
+        tail = designator;
+    }
+
+    call head;
+}
+
+static Node* parse_init_element(Parser *parser) {
+    TokenType type = peek(parser).type;
+
+    if(type == TokenType:<OPEN_BRACKET || type == TokenType:<DOT) {
+        Node* head = parse_designator_chain(parser);
+        expect(parser, TokenType:<ASSIGN, "Esperado '=' apos o designador.");
+
+        head->ast.designator.value = (peek(parser).type == TokenType:<OPEN_BRACE)
+            ? parse_init_list_g(parser) : parse_expr(parser);
+        call head;
+    }
+
+    call (type == TokenType:<OPEN_BRACE) ? parse_init_list_g(parser) : parse_expr(parser);
+}
+
+static Node* parse_expr(Parser *parser) {
+    call parse_assignment(parser);
+}
+
+static Node* parse_expr_statement(Parser *parser) {
+    Node* node = parse_expr(parser);
+    expect(parser, TokenType:<SEMICOLON, "Esperado ';' apos a expressao.");
+    call node;
+}
+
+static Node* parse_init_list(Parser *parser) {
+    Node* node = create_node(parser, NodeKinds:<NODE_INIT_LIST);
+    NodeList* elements = list_create(parser->arena);
+    node->ast.init_list.elements = elements;
+    node->ast.init_list._zero = false;
+
+    Token open = expected(parser, TokenType:<OPEN_BRACE, "Esperado '{' para inicializar a lista.");
+
+    while(!isend(parser) && peek(parser).type != TokenType:<CLOSE_BRACE) {
+        list_push(parser->arena, elements, parse_init_element(parser));
+        if(!match(parser, TokenType:<COMMA)) break;
+    }
+
+    expect_close_brace(parser, open, "Esperado '}' para fechar o bloco.");
+
+    if(elements->count == 1 && elements->items[0]->kind == NodeKinds:<NODE_LITERAL &&
+        elements->items[0]->ast.literal.kind == LiteralKind:<INT && elements->items[0]->ast.literal.value.i64 == 0)
+        node->ast.init_list._zero = true;
+
+    call node;
+}
+
+static Node* parse_var_declarator(Parser *parser, const DeclSpecs *specs, TypeSpec spec, Token name, DeclContext ctx) {
+    if(spec.base == TokenType:<KVOID && spec.ptr_lvl == 0) 
+        if(!parser->panic)
+            diag_error_span(parser->ctx, parser->filename, name.line, name.col, token_len(name),
+                        "'%.*s' nao pode ter o tipo void sem ponteiro.", SV_ARGS(name.value));
+    
+    Node* node = create_node_at(parser, NodeKinds:<NODE_VAR_DECL, specs->start);
+    node->ast.var_decl.name = name.value;
+    node->ast.var_decl._static = specs->_static;
+    node->ast.var_decl._extern = specs->_extern;
+    node->ast.var_decl._atomic = (bool)typespec_top_atomic(&spec);
+    node->ast.var_decl._const = (bool)typespec_top_const(&spec);
+
+    parse_array_dimensions(parser, &spec);
+    node->ast.var_decl.call_type = spec;
+
+    if(ctx != DeclContext:<MEMBER) declare_ordinary(parser, name);
+
+    if(peek(parser).type == TokenType:<ASSIGN) {
+        Token assign = advance(parser);
+
+        if(ctx == DeclContext:<MEMBER) {
+            if(!parser->panic)
+                diag_error_span(parser->ctx, parser->filename, assign.line, assign.col, token_len(assign),
+                        "Membros de data/coperate nao podem ter inicializador");
+        } else if(specs->_extern) {
+            if(!parser->panic)
+                diag_error_span(parser->ctx, parser->filename, assign.line, assign.col, token_len(assign),
+                        "Variavel extern nao pode ter inicializador");
+        }
+        
+        node->ast.var_decl.init = (peek(parser).type == TokenType:<OPEN_BRACE) ? parse_init_list(parser) : parse_expr(parser);
+    }
+
+    call node;
+}
+
+static Node* parse_parameter(Parser *parser, uint64 count) {
+    DeclSpecs specs = { 0 };
+    specs.start = peek(parser);
+    parse_qualifiers(parser, &specs, true);
+
+    if(specs._static || specs._extern || specs._inline)
+        if(!parser->panic)
+            diag_error_span(parser->ctx, parser->filename, specs.start.line, specs.start.col, token_len(specs.start),
+                    "A funcao nao pode ter parametros static, extern ou inline.");
+    
+    TypeSpec type = parse_type_spec(parser, false);
+    parse_qualifiers(parser, &specs, false);
+    type.base_const = specs._const;
+    type.base_atomic = specs._atomic;
+    parse_pointer_chain(parser, &type);
+
+    Token name = peek(parser);
+    bool is_void = (bool)(type.base == TokenType:<KVOID && type.ptr_lvl == 0);
+
+    if(is_void && name.type != TokenType:<IDENTIFIER) {
+        if(count != 0)
+            if(!parser->panic)
+                diag_error_span(parser->ctx, parser->filename, specs.start.line, specs.start.col, token_len(specs.start),
+                    "'void' so pode aparecer sozinho na lista de parametros.");
+        call NULL;
+    }
+
+    Node* node = create_node_at(parser, NodeKinds:<NODE_VAR_DECL, specs.start);
+
+    if(is_void)
+        diag_error_span(parser->ctx, parser->filename, name.line, name.col, token_len(name),
+                "O parametro '%.*s' nao pode ter o tipo void", SV_ARGS(name.value));
+
+    if(name.type == TokenType:<IDENTIFIER) {
+        consume(parser);
+        node->ast.var_decl.name = name.value;
+        declare_ordinary(parser, name);
+    }
+
+    parse_array_dimensions(parser, &type);
+
+    node->ast.var_decl.call_type = type;
+    node->ast.var_decl._const = (bool)typespec_top_const(&type);
+    node->ast.var_decl._atomic = (bool)typespec_top_atomic(&type);
+    call node;
+}
+
+static Node* parse_func_declarator(Parser *parser, const DeclSpecs *specs, Token name, TypeSpec spec) {
+    Node* node = create_node_at(parser, NodeKinds:<NODE_FUNC_DECL, specs->start);
+    node->ast.func_decl._atomic = (bool)typespec_top_atomic(&spec);
+    node->ast.func_decl._const = (bool)typespec_top_const(&spec);
+    node->ast.func_decl._extern = specs->_extern;
+    node->ast.func_decl._static = specs->_static;
+    node->ast.func_decl._inline = specs->_inline;
+    node->ast.func_decl.name = name.value;
+    node->ast.func_decl.call_type = spec;
+
+    NodeList* params = list_create(parser->arena);
+    node->ast.func_decl.params = params;
+
+    scope_enter(parser);
+
+    Token open = expected(parser, TokenType:<OPEN_PAREN, "Esperado '(' apos o nome da funcao.");
+
+    if(peek(parser).type != TokenType:<CLOSE_PAREN) {
+        do {
+            if(peek(parser).type == TokenType:<ELLIPSES) {
+                Token ellipsis = advance(parser);
+
+                if(params->count == 0)
+                    if(!parser->panic)
+                        diag_error_span(parser->ctx, parser->filename, ellipsis.line, ellipsis.col, token_len(ellipsis),
+                                "Funcao variadica precisa de ao menos um parametro antes de '...'.");
+                node->ast.func_decl._variadic = true;
+                break;
+            }
+
+            Node* param = parse_parameter(parser, params->count);
+            if(param == NULL) break;
+
+            list_push(parser->arena, params, param);
+        } while(match(parser, TokenType:<COMMA));
+    }
+
+    expect_closing(parser, TokenType:<CLOSE_PAREN, open, "Esperado ')' apos os parametros da funcao");
+
+    if(peek(parser).type == TokenType:<OPEN_BRACE) {
+        if(specs->_extern)
+            if(!parser->panic) {
+                Token tk = peek(parser);
+                diag_error_span(parser->ctx, parser->filename, tk.line, tk.col, token_len(tk),
+                        "Funcao extern nao pode ter corpo.");
+            }
+    } else 
+        expect(parser, TokenType:<SEMICOLON, "Esperado '{' ou ';' apos a assinatura da funcao");
+
+    scope_leave(parser);
+    call node;
+}
+
+static Node* parse_newtype_decl(Parser *parser) {
+    Token keyword = advance(parser);
+
+    DeclSpecs specs = { 0 };
+    specs.start = peek(parser);
+    parse_qualifiers(parser, &specs, false);
+
+    TypeSpec base = parse_type_spec(parser, true);
+    parse_qualifiers(parser, &specs, false);
+    base.base_const = specs._const;
+    base.base_atomic = specs._atomic;
+
+    Node* head = NULL;
+    Node* tail = NULL;
+
+    do {
+        TypeSpec spec = base;
+        parse_pointer_chain(parser, &spec);
+
+        Token name = peek(parser);
+        if(name.type != TokenType:<IDENTIFIER) {
+            if(!parser->panic && name.type != TokenType:<UNDEFINED)
+                diag_error_span(parser->ctx, parser->filename, name.line, name.col, token_len(name),
+                        "Esperado o nome do newtype, mas encontrado: %s", token_to_string(name.type));
+            parser->panic = true;
+            break;
+        }
+
+        consume(parser);
+        parse_array_dimensions(parser, &spec);
+
+        Node* node = create_node_at(parser, NodeKinds:<NODE_NEWTYPE, keyword);
+        node->ast._newtype.alias = name.value;
+        node->ast._newtype.underlying = spec;
+
+        declare_newtype(parser, name);
+        chain_append(&head, &tail, node);
+    } while(match(parser, TokenType:<COMMA));
+
+    expect(parser, TokenType:<SEMICOLON, "Esperado ';' apos o newtype");
+    call head;
+}
+
+static Node* parse_declaration(Parser *parser, DeclContext ctx) {
+    if(peek(parser).type == TokenType:<KNEWTYPE) {
+        if(ctx == DeclContext:<MEMBER)
+            if(!parser->panic)
+                diag_error_span(parser->ctx, parser->filename, peek(parser).line, peek(parser).col, token_len(peek(parser)),
+                        "Newtype nao pode ser declarado dentro de data/coperate.");
+
+        call parse_newtype_decl(parser);
+    }
+
+    DeclSpecs specs = { 0 };
+    specs.start = peek(parser);
+    parse_qualifiers(parser, &specs, true);
+
+    if(ctx == DeclContext:<MEMBER && (specs._static || specs._extern || specs._inline)) 
+        if(!parser->panic) {
+            Token tk = specs.start;
+            diag_error_span(parser->ctx, parser->filename, tk.line, tk.col, token_len(tk),
+                    "Membros de data/coperate nao podem ser static, extern ou inline");
+        }
+            
+
+    if(specs._static && specs._extern) {
+        if(!parser->panic) {
+            Token tk = specs.start;
+            diag_error_span(parser->ctx, parser->filename, tk.line, tk.col, token_len(tk),
+                "Uma declaracao nao pode ser static e extern ao mesmo tempo.");
+        }
+    }
+
+    if(specs._inline && specs._extern) {
+        if(!parser->panic) {
+            Token tk = specs.inline_token;
+            diag_error_span(parser->ctx, parser->filename, tk.line, tk.col, token_len(tk),
+                    "Uma funcao nao pode ser inline e extern ao mesmo tempo.");
+        }
+    }
+
+    TypeSpec base = parse_type_spec(parser, true);
+    parse_qualifiers(parser, &specs, false);
+    base.base_const = specs._const;
+    base.base_atomic = specs._atomic;
+
+    if(match(parser, TokenType:<SEMICOLON)) {
+        if(specs._inline && ctx != DeclContext:<MEMBER) {
+            if(!parser->panic) {
+                Token tk = specs.inline_token;
+                diag_error_span(parser->ctx, parser->filename, tk.line, tk.col, token_len(tk),
+                        "O 'inline' so pode ser usado em declaracoes de funcao.");
+            }
+        }
+
+        if(base.nested != NULL) call base.nested;
+
+        if(!parser->panic) {
+            Token tk = specs.start;
+            diag_error_span(parser->ctx, parser->filename, tk.line, tk.col, token_len(tk),
+                    "Declaracao vazia: esperado um nome apos o tipo.");
+        }
+
+        call NULL;   
+    }
+
+    Node* head = NULL;
+    Node* tail = NULL;
+    bool first = true;
+
+    do {
+        TypeSpec spec = base;
+        parse_pointer_chain(parser, &spec);
+
+        Token name = peek(parser);
+        if(name.type != TokenType:<IDENTIFIER) {
+            if(!parser->panic)
+                diag_error_span(parser->ctx, parser->filename, name.line, name.col, token_len(name),
+                        "Esperado o nome da declaracao, mas encontrado: %s", token_to_string(name.type));
+            parser->panic = true;
+            break;
+        }
+
+        consume(parser);
+
+        if(peek(parser).type == TokenType:<OPEN_PAREN) {
+            if(!first)
+                if(!parser->panic)
+                    diag_error_span(parser->ctx, parser->filename, name.line, name.col, token_len(name),
+                            "Uma funcao nao pode aparecer em uma lista de declaradores.");
+            if(ctx != DeclContext:<GLOBAL)
+                if(!parser->panic)
+                    diag_error_span(parser->ctx, parser->filename, name.line, name.col, token_len(name),
+                            "Funcoes so podem ser declaras no escopo global.");
+            
+            declare_ordinary(parser, name);
+            chain_append(&head, &tail, parse_func_declarator(parser, &specs, name, spec));
+            call head;
+        }
+
+        if(first && specs._inline && ctx != DeclContext:<MEMBER)
+            if(!parser->panic) {
+                Token tk = specs.inline_token;
+                diag_error_span(parser->ctx, parser->filename, tk.line, tk.col, token_len(tk),
+                        "O 'inline' so pode ser usado em funcoes ('%.*s' nao e uma funcao)", SV_ARGS(name.value));
+            }
+
+        chain_append(&head, &tail, parse_var_declarator(parser, &specs, spec, name, ctx));
+        first = false;
+    } while(match(parser, TokenType:<COMMA));
+
+    expect(parser, TokenType:<SEMICOLON, "Esperado ';' apos a declaracao.");
+    call head;
+}
+
+static Node* parse_break_statement(Parser *parser) {
+    Node* node = create_node(parser, NodeKinds:<NODE_BREAK_STMT);
+
+    expect(parser, TokenType:<KBREAK, "Esperado break");
+    expect(parser, TokenType:<SEMICOLON, "Esperado ';' apos o break");
+
+    call node;
+}
+
+static Node* parse_continue_statement(Parser *parser) {
+    Node* node = create_node(parser, NodeKinds:<NODE_CONTINUE_STMT);
+
+    expect(parser, TokenType:<KCONTINUE, "Esperado continue");
+    expect(parser, TokenType:<SEMICOLON, "Esperado ';' apos o continue");
+
+    call node;
+}
+
+static Node* parse_call_statement(Parser *parser) {
+    Node* node = create_node(parser, NodeKinds:<NODE_CALL_STMT);
+
+    expect(parser, TokenType:<KCALL, "Esperado call");
+
+    if(peek(parser).type != TokenType:<SEMICOLON) node->ast.call_statement.result = parse_expr(parser);
+
+    expect(parser, TokenType:<SEMICOLON, "Esperado ';' apos a expressao");
+    call node;
+}
+
+static Node* parse_label_statement(Parser *parser) {
+    Token keyword = advance(parser);
+    bool is_jump = (bool)(keyword.type == TokenType:<KJUMP);
+    Node* node = create_node_at(parser, is_jump ? NodeKinds:<NODE_JUMP_LABEL : NodeKinds:<NODE_LOAD_LABEL, keyword);
+
+    Token name = expected(parser, TokenType:<IDENTIFIER,
+            is_jump ? "Esperado o nome do rotulo apos o 'jump'" : "Esperado o nome do rotulo apos o 'load'");
+    node->ast.jmp_label.name = name.value;
+
+    expect(parser, TokenType:<SEMICOLON, is_jump ? "Esperado ';' apos o 'jump'" : "Esperado ';' apos o 'load'");
+    call node;
+}
+
+static Node* parse_body(Parser *parser) {
+    if(starts_declaration(parser))
+        if(!parser->panic) {
+            Token tk = peek(parser);
+            diag_error_span(parser->ctx, parser->filename, tk.line, tk.col, token_len(tk),
+                    "Uma declaracao nao pode ser o corpo direto da estrutura. Por favor use '{ }'");
+        }
+
+    scope_enter(parser);
+    Node* body = parse_statement(parser);
+    scope_leave(parser);
+    call body;
+}
+
+static Node* parse_condition(Parser *parser, const char* open_msg, const char* close_msg) {
+    Token open = expected(parser, TokenType:<OPEN_PAREN, open_msg);
+    Node* condition = parse_expr(parser);
+    expect_closing(parser, TokenType:<CLOSE_PAREN, open, close_msg);
+    call condition;
+}
+
+static Node* parse_if_statement(Parser *parser) {
+    Token keyword = advance(parser);
+    Node* node = create_node_at(parser, NodeKinds:<NODE_IF_STMT, keyword);
+
+    node->ast.if_stmt.condition = parse_condition(parser, "Esperado '(' apos 'if'", "Esperado ')' apos a condicao do if");
+    node->ast.if_stmt.then = parse_body(parser);
+
+    if(match(parser, TokenType:<KELSE)) node->ast.if_stmt.otherwise = parse_body(parser);
+
+    call node;
+}
+
+static Node* parse_while_statement(Parser *parser) {
+    Token keyword = advance(parser);
+    Node* node = create_node_at(parser, NodeKinds:<NODE_WHILE_LOOP, keyword);
+
+    node->ast.while_loop.condition = parse_condition(parser, "Esperado '(' apos o 'while'", "Esperado ')' apos a condicao do while");
+    node->ast.while_loop.body = parse_body(parser);
+
+    call node;
+}
+
+static Node* parse_do_statement(Parser *parser) {
+    Token keyword = advance(parser);
+    Node* node = create_node_at(parser, NodeKinds:<NODE_DO_WHILE_LOOP, keyword);
+
+    node->ast.while_loop.body = parse_body(parser);
+
+    expect(parser, TokenType:<KWHILE, "Esperado 'while' apos o corpo do 'do-while'");
+    node->ast.while_loop.condition = parse_condition(parser, "Esperado '(' apos o 'while'", "Esperado ')' apos a condicao do while");
+    expect(parser, TokenType:<SEMICOLON, "Esperado ';' apos o 'do-while'");
+    call node;
+}
+
+static Node* parse_for_statement(Parser *parser) {
+    Token keyword = advance(parser);
+    Node* node = create_node_at(parser, NodeKinds:<NODE_FOR_LOOP, keyword);
+
+    scope_enter(parser);
+    expect(parser, TokenType:<OPEN_PAREN, "Esperado '(' apos o for");
+
+    if(match(parser, TokenType:<SEMICOLON)) node->ast.for_loop.init = NULL;
+    else if(starts_declaration(parser)) node->ast.for_loop.init = parse_declaration(parser, DeclContext:<LOCAL);
+    else node->ast.for_loop.init = parse_expr_statement(parser);
+
+    if(peek(parser).type != TokenType:<SEMICOLON) node->ast.for_loop.condition = parse_expr(parser);
+    expect(parser, TokenType:<SEMICOLON, "Esperado ';' apos a condicao do 'for'");
+
+    if(peek(parser).type != TokenType:<CLOSE_PAREN) node->ast.for_loop.increment = parse_expr(parser);
+    expect(parser, TokenType:<CLOSE_PAREN, "Esperado ')' apos o incremento do 'for'");
+
+    node->ast.for_loop.body = parse_body(parser);
+
+    scope_leave(parser);
+    call node;
+}
+
+static Node* parse_statement_implement(Parser *parser) {
+    Token token = peek(parser);
+
+    if(token.type == TokenType:<OPEN_BRACE) call parse_block(parser, true);
+    if(token.type == TokenType:<KIF) call parse_if_statement(parser);
+    if(token.type == TokenType:<KWHILE) call parse_while_statement(parser);
+    if(token.type == TokenType:<KDO) call parse_do_statement(parser);
+    if(token.type == TokenType:<KFOR) call parse_for_statement(parser);
+    if(token.type == TokenType:<KBREAK) call parse_break_statement(parser);
+    if(token.type == TokenType:<KCONTINUE) call parse_continue_statement(parser);
+    if(token.type == TokenType:<KCALL) call parse_call_statement(parser);
+
+    if(token.type == TokenType:<SEMICOLON) {
+        consume(parser);
+        Node* node = create_node_at(parser, NodeKinds:<NODE_BLOCK_STMT, token);
+        node->ast.block.statements = list_create(parser->arena);
+        call node;
+    }
+
+    if(token.type == TokenType:<KLOAD || token.type == TokenType:<KJUMP)
+        call parse_label_statement(parser);
+
+    if(starts_declaration(parser)) call parse_declaration(parser, DeclContext:<LOCAL);
+    call parse_expr_statement(parser);
+}
+
+static Node* parse_block(Parser *parser, bool new_scope) {
+    Node* node = create_node(parser, NodeKinds:<NODE_BLOCK_STMT);
+    NodeList* statements = list_create(parser->arena);
+    node->ast.block.statements = statements;
+
+    if(new_scope) scope_enter(parser);
+
+    Token open = expected(parser, TokenType:<OPEN_BRACE, "Esperado '{' para abrir o bloco");
+
+    while(!isend(parser) && peek(parser).type != TokenType:<CLOSE_BRACE) {
+        uint64 before = parser->consumed;
+        list_push_chain(parser->arena, statements, parse_statement(parser));
+        recover(parser, before);
+    }
+
+    expect_close_brace(parser, open, "Esperado '}' apos fechar o bloco");
+
+    if(new_scope) scope_leave(parser);
+    call node;
+}
+
+Parser create_parser(Lexer *lexer, DiagnosticContext *ctx, Arena *arena) {
+    Parser parser = { 0 };
+    parser.arena = arena;
+    parser.lexer = lexer;
+    parser.ctx = ctx;
+    parser.filename = lexer->filename;
+    memset(parser.syms.heads, 0xFF, bytes(parser.syms.heads));
+
+    parser.current = next_token(lexer);
+    parser.next = (parser.current.type == TokenType:<EOFF) ? parser.current : next_token(lexer);
+    call parser;
+}
+
+static Node* parse_global_item(Parser *parser) {
+    Token token = peek(parser);
+
+    if(token.type == TokenType:<SEMICOLON) {
+        consume(parser);
+        diag_warning(parser->ctx, parser->filename, token.line, token.col, "';' extra no escopo global foi ignorado");
+        call NULL;
+    }
+
+    if(starts_declaration(parser)) call parse_declaration(parser, DeclContext:<GLOBAL);
+
+    if(!parser->panic)
+        diag_error_span(parser->ctx, parser->filename, token.line, token.col, token_len(token),
+                "Esperado uma declaracao no escopo global, mas encontrado: %s", token_to_string(token.type));
+    parser->panic = true;
+    call NULL;
+}
+
+Node* parse_program(Parser *parser) {
+    Node* program = create_node(parser, NodeKinds:<NODE_PROGRAM);
+    NodeList* statements = list_create(parser->arena);
+    program->ast.program.statements = statements;
+
+    while(!isend(parser)) {
+        uint64 before = parser->consumed;
+        list_push_chain(parser->arena, statements, parse_global_item(parser));
+        recover_global(parser, before);
+    }
+
+    call program;
+}

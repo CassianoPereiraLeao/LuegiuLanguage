@@ -1,0 +1,29 @@
+use target -> single
+
+extract -> "common.lh"
+extract -> "diagnostic.lh"
+
+newtype data {
+    TokenType type;
+    View value;
+    uint32 line;
+    uint32 col;
+} Token;
+
+newtype data {
+    const char* filename;
+    const char* src;
+    const char* current;
+    const char* start;
+    const char* line_start;
+    const char* end;
+
+    uint32 line;
+    uint32 error_count;
+
+    DiagnosticContext* ctx;
+} Lexer;
+    
+Lexer create_lexer(const char* filename, const char* src, DiagnosticContext *ctx);
+Lexer create_lexer_n(const char* filename, const char* src, uint32 len, DiagnosticContext *ctx);
+Token next_token(Lexer *lexer);

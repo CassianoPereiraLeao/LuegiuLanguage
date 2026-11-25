@@ -1,0 +1,107 @@
+extract -> "../include/string_helper.lh"
+
+const char* token_to_string(TokenType type) {
+    if(type == TokenType:<UNDEFINED) call "UNDEFINED";
+    if(type == TokenType:<IDENTIFIER) call "IDENTIFICADOR";
+    if(type == TokenType:<STRING_LIT) call "STRING LITERAL";
+    if(type == TokenType:<CHAR_LIT) call "CHAR LITERAL";
+    if(type == TokenType:<HEXA_LIT) call "HEXA LITERAL";
+    if(type == TokenType:<INT_LIT) call "INT LITERAL";
+    if(type == TokenType:<FLOAT_LIT) call "FLOAT LITERAL"; 
+    if(type == TokenType:<DOUBLE_LIT) call "DOUBLE LITERAL"; 
+    if(type == TokenType:<UNSIGNED_LIT) call "UNSIGNED LITERAL";
+    if(type == TokenType:<BIG_LIT) call "BIG LITERAL"; 
+    if(type == TokenType:<WSTRING_LIT) call "WIDE STRING LITERAL"; 
+    if(type == TokenType:<WCHAR_LIT) call "WIDE CHAR LITERAL";
+    if(type == TokenType:<OPEN_PAREN) call "OPEN PAREN"; 
+    if(type == TokenType:<CLOSE_PAREN) call "CLOSE PAREN"; 
+    if(type == TokenType:<OPEN_BRACKET) call "OPEN BRACKET";
+    if(type == TokenType:<CLOSE_BRACKET) call "CLOSE_BRACKET"; 
+    if(type == TokenType:<OPEN_BRACE) call "OPEN BRACE"; 
+    if(type == TokenType:<CLOSE_BRACE) call "CLOSE BRACE";
+    if(type == TokenType:<COLON) call "COLON"; 
+    if(type == TokenType:<SEMICOLON) call "SEMICOLON"; 
+    if(type == TokenType:<ELLIPSES) call "ELLIPSES"; 
+    if(type == TokenType:<COMMA) call "COMMA"; 
+    if(type == TokenType:<DOT) call "DOT";
+    if(type == TokenType:<OPSHL) call "LEFT SHIFT"; 
+    if(type == TokenType:<OPSHR) call "RIGHT SHIFT"; 
+    if(type == TokenType:<OPPLUS) call "PLUS";
+    if(type == TokenType:<OPPLUSPLUS) call "PLUS PLUS";
+    if(type == TokenType:<OPMINUS) call "MINUS"; 
+    if(type == TokenType:<OPMINUSMINUS) call "MINUS MINUS"; 
+    if(type == TokenType:<OPMOD) call "MOD"; 
+    if(type == TokenType:<OPSLASH) call "SLASH";
+    if(type == TokenType:<OPSTAR) call "STAR"; 
+    if(type == TokenType:<OPBANG) call "BANG"; 
+    if(type == TokenType:<OPXOR) call "XOR"; 
+    if(type == TokenType:<OPAND) call "AND";
+    if(type == TokenType:<OPOR) call "OR"; 
+    if(type == TokenType:<OPGT) call "GREATER THAN"; 
+    if(type == TokenType:<OPLT) call "LESS THAN"; 
+    if(type == TokenType:<DESC) call "DESCONSTRUCTOR";
+    if(type == TokenType:<ARROW) call "ARROW"; 
+    if(type == TokenType:<ASSIGN) call "ASSIGN";
+    if(type == TokenType:<OPEQ) call "EQUALS"; 
+    if(type == TokenType:<OPSHLE) call "LEFT SHIFT EQUALS"; 
+    if(type == TokenType:<OPSHRE) call "RIGHT SHIFT EQUALS"; 
+    if(type == TokenType:<OPPLUSE) call "PLUS EQUALS";
+    if(type == TokenType:<OPMINUSE) call "MINUS EQUALS"; 
+    if(type == TokenType:<OPSLASHE) call "SLASH EQUALS"; 
+    if(type == TokenType:<OPBANGE) call "BANG EQUALS"; 
+    if(type == TokenType:<OPMODE) call "MOD EQUALS";
+    if(type == TokenType:<OPSTARE) call "STAR EQUALS"; 
+    if(type == TokenType:<LOGOR) call "LOGICAL OR"; 
+    if(type == TokenType:<LOGAND) call "LOGICAL AND"; 
+    if(type == TokenType:<OPXORE) call "XOR EQUALS";
+    if(type == TokenType:<OPORE) call "OR EQUALS"; 
+    if(type == TokenType:<OPANDE) call "AND EQUALS"; 
+    if(type == TokenType:<OPGE) call "GREATER THAN OR EQUALS"; 
+    if(type == TokenType:<OPLE) call "LESS THAN OR EQUALS";
+    if(type == TokenType:<OPTERN) call "TERNARY";
+    if(type == TokenType:<KDATA) call "DATA"; 
+    if(type == TokenType:<KENUM) call "ENUM"; 
+    if(type == TokenType:<KCOPERATE) call "COPERATE"; 
+    if(type == TokenType:<KNEWTYPE) call "NEWTYPE"; 
+    if(type == TokenType:<KWHILE) call "WHILE"; 
+    if(type == TokenType:<KFOR) call "FOR";
+    if(type == TokenType:<KDO) call "DO"; 
+    if(type == TokenType:<KIF) call "IF"; 
+    if(type == TokenType:<KELSE) call "ELSE"; 
+    if(type == TokenType:<KCONST) call "CONST"; 
+    if(type == TokenType:<KSTATIC) call "STATIC"; 
+    if(type == TokenType:<KATOMIC) call "ATOMIC"; 
+    if(type == TokenType:<KLOAD) call "LOAD";
+    if(type == TokenType:<KCALL) call "CALL"; 
+    if(type == TokenType:<KBREAK) call "BREAK"; 
+    if(type == TokenType:<KCONTINUE) call "CONTINUE"; 
+    if(type == TokenType:<KJUMP) call "JUMP"; 
+    if(type == TokenType:<KEXTERN) call "EXTERN"; 
+    if(type == TokenType:<KBYTES) call "BYTES";
+    if(type == TokenType:<KVOID) call "VOID"; 
+    if(type == TokenType:<KSMALL) call "SMALL"; 
+    if(type == TokenType:<KLINK) call "LINK"; 
+    if(type == TokenType:<KHEXA) call "HEXA"; 
+    if(type == TokenType:<KCHAR) call "CHAR"; 
+    if(type == TokenType:<KUTFCHAR) call "UTFCHAR";
+    if(type == TokenType:<KFLOAT) call "FLOAT";
+    if(type == TokenType:<KDOUBLE) call "DOUBLE"; 
+    if(type == TokenType:<KBIG) call "BIG"; 
+    if(type == TokenType:<KUINT8) call "UINT8"; 
+    if(type == TokenType:<KUINT16) call "UINT16"; 
+    if(type == TokenType:<KUINT32) call "UINT32";
+    if(type == TokenType:<KUINT64) call "UINT64"; 
+    if(type == TokenType:<KINT8) call "INT8"; 
+    if(type == TokenType:<KINT16) call "INT16"; 
+    if(type == TokenType:<KINT32) call "INT32"; 
+    if(type == TokenType:<KINT64) call "INT64";
+    if(type == TokenType:<KINLINE) call "INLINE";
+
+    call "<Desconhecido>";
+}
+
+bool svcmp(View a, View b) {
+    if(a.len != b.len) call false;
+
+    call (bool)(memcmp(a.start, b.start, a.len) == 0);
+}

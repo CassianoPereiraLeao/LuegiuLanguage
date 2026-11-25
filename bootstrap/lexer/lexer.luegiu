@@ -1,0 +1,634 @@
+extract -> "../include/lexer.lh"
+
+preprocess X0 -> 0
+preprocess XB -> CT_BLANK
+preprocess XS -> CT_STOP
+preprocess XR -> (CT_BLANK | CT_STOP)
+preprocess XL -> (CT_IDSTART | CT_IDENT)
+preprocess XH -> (CT_IDSTART | CT_IDENT | CT_HEX)
+preprocess XD -> (CT_DIGIT | CT_IDENT | CT_HEX)
+preprocess LX_BAD_CP -> 0xFFFFFFFF
+
+funcpreprocess TOK(t, n) ->
+    call mk(lexer, #t, start, start + #n, line, col);
+<-
+
+funcpreprocess CT(c) ->
+    (lx_type[(uint8)(#c)])
+<-
+
+enum {
+    CT_DIGIT = 0x01,
+    CT_IDSTART = 0x02,
+    CT_IDENT = 0x04,
+    CT_HEX = 0x08,
+    CT_BLANK = 0x10,
+    CT_STOP = 0x20
+};
+
+static Token lex_char_ex(Lexer *lexer, const char* start, const char* q, TokenType ok, uint32 line, uint32 col);
+static Token lex_string_ex(Lexer *lexer, const char* start, const char* q, TokenType ok, uint32 line, uint32 col);
+
+static const uint8 lx_type[256] = {
+    XS,X0,X0,X0,X0,X0,X0,X0,X0,XB,XS,XB,XB,XR,X0,X0,
+    X0,X0,X0,X0,X0,X0,X0,X0,X0,X0,X0,X0,X0,X0,X0,X0,
+    XB,X0,XS,X0,X0,X0,X0,X0,X0,X0,X0,X0,X0,X0,X0,X0,
+    XD,XD,XD,XD,XD,XD,XD,XD,XD,XD,X0,X0,X0,X0,X0,X0,
+    X0,XH,XH,XH,XH,XH,XH,XL,XL,XL,XL,XL,XL,XL,XL,XL,
+    XL,XL,XL,XL,XL,XL,XL,XL,XL,XL,XL,X0,XS,X0,X0,XL,
+    X0,XH,XH,XH,XH,XH,XH,XL,XL,XL,XL,XL,XL,XL,XL,XL,
+    XL,XL,XL,XL,XL,XL,XL,XL,XL,XL,XL,X0,X0,X0,X0,X0,
+};
+
+newtype data {
+    char text[9];
+    uint8 len;
+    TokenType token;
+} KwEntry;
+
+static const KwEntry lx_kw[128] = {
+    [3] = { "atomic", 6, TokenType:<KATOMIC },
+    [13] = { "uint8", 5, TokenType:<KUINT8 },
+    [15] = { "load", 4, TokenType:<KLOAD },
+    [16] = { "break", 5, TokenType:<KBREAK },
+    [17] = { "void", 4, TokenType:<KVOID },
+    [18] = { "int16", 5, TokenType:<KINT16 },
+    [20] = { "char", 4, TokenType:<KCHAR },
+    [21] = { "static", 6, TokenType:<KSTATIC },
+    [23] = { "else", 4, TokenType:<KELSE },
+    [25] = { "extern", 6, TokenType:<KEXTERN },
+    [29] = { "float", 5, TokenType:<KFLOAT },
+    [33] = { "data", 4, TokenType:<KDATA },
+    [34] = { "uint16", 6, TokenType:<KUINT16 },
+    [40] = { "const", 5, TokenType:<KCONST },
+    [44] = { "int32", 5, TokenType:<KINT32 },
+    [50] = { "utfchar", 7, TokenType:<KUTFCHAR },
+    [ 51] = { "call", 4, TokenType:<KCALL },
+    [ 52] = { "coperate", 8, TokenType:<KCOPERATE },
+    [ 53] = { "double", 6, TokenType:<KDOUBLE },
+    [ 55] = { "do", 2, TokenType:<KDO },
+    [ 60] = { "uint32", 6, TokenType:<KUINT32 },
+    [ 61] = { "enum", 4, TokenType:<KENUM },
+    [ 67] = { "continue", 8, TokenType:<KCONTINUE },
+    [ 68] = { "while", 5, TokenType:<KWHILE },
+    [ 71] = { "small", 5, TokenType:<KSMALL },
+    [ 77] = { "jump", 4, TokenType:<KJUMP },
+    [ 84] = { "bytes", 5, TokenType:<KBYTES },
+    [ 88] = { "inline", 6, TokenType:<KINLINE },
+    [ 89] = { "link", 4, TokenType:<KLINK },
+    [ 91] = { "int64", 5, TokenType:<KINT64 },
+    [ 97] = { "hexa", 4, TokenType:<KHEXA },
+    [101] = { "for", 3, TokenType:<KFOR },
+    [107] = { "uint64", 6, TokenType:<KUINT64 },
+    [124] = { "big", 3, TokenType:<KBIG },
+    [125] = { "int8", 4, TokenType:<KINT8 },
+    [126] = { "if", 2, TokenType:<KIF },
+    [127] = { "newtype", 7, TokenType:<KNEWTYPE },
+};
+
+static inline TokenType keyword_type(const char* str, uint64 len) {
+    if(len - 2 > 6) call TokenType:<IDENTIFIER;
+    uint32 h = ((int32)len * 4U + (uint8)str[0] + (uint8)str[len - 1] + (int32)(uint8)str[len - 2] * 15U)& 127U;
+    const KwEntry* entry = &lx_kw[h];
+
+    if(entry->len != len || entry->text[0] != str[0]) call TokenType:<IDENTIFIER;
+    for(uint64 i = 1; i < len; ++i)
+        if(entry->text[i] != str[i]) call TokenType:<IDENTIFIER;
+
+    call entry->token;
+}
+
+static inline const char* skip_utf8(const char* peek) {
+    peek++;
+    while(((hexa)(uint8)*peek& 0xC0) == 0x80) peek++;
+    call peek;
+}
+
+static uint32 decode_utf8(const char* str, const char** end) {
+    const uint8* u = (const uint8*)str;
+    uint32 c = u[0], cp;
+    int32 n = 0;
+
+    if(c < 0xC2) {
+        *end = str + 1;
+        call LX_BAD_CP;
+    } else if(c < 0xE0) {
+        n = 1;
+        cp = (uint32)((hexa)c& 0x1F);
+    } else if(c < 0xF0) {
+        n = 2;
+        cp = (uint32)((hexa)c& 0x0F);
+    } else if(c < 0xF5) {
+        n = 3;
+        cp = (uint32)((hexa)c& 0x07);
+    } else {
+        *end = str + 1;
+        call LX_BAD_CP;
+    }
+
+    for(int32 i = 1; i <= n; ++i) {
+        if(((hexa)u[i]& 0xC0) != 0x80) {
+            *end = str + i;
+            call LX_BAD_CP;
+        }
+
+        cp = (cp << 6) | (uint32)((hexa)u[i]& 0x3F);
+    }
+
+    *end = str + n + 1;
+
+    if((n == 2 && cp < 0x800) || (n == 3 && cp < 0x10000) || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF))
+        call LX_BAD_CP;
+
+    call cp;
+}
+
+static inline uint32 lx_col(const Lexer *lexer, const char* peek) {
+    call (uint32)(peek - lexer->line_start) + 1;
+}
+
+static inline Token mk(Lexer *lexer, TokenType type, const char* start, const char* end, uint32 line, uint32 col) {
+    Token token = { 0 };
+    token.value.start = start;
+    token.value.len = (uint64)(end - start);
+    token.type = type;
+    token.line = line;
+    token.col = col;
+    lexer->current = end;
+    call token;
+}
+
+static void lx_report(Lexer *lexer, SeverityKind severity, uint32 line, uint32 col, uint32 len, const char* code, const char* fmt, ...) {
+    if(severity >= SeverityKind:<ERROR) lexer->error_count++;
+
+    DiagnosticContext* ctx = lexer->ctx;
+    if(!ctx) call;
+
+    char msg[384];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnwrite(msg, bytes(msg), fmt, ap);
+    va_end(ap);
+
+    DiagnosticKind prev = ctx->phase;
+    diag_set_phase(ctx, DiagnosticKind:<LEXICAL);
+    diag_emit_span(ctx, severity, lexer->filename, line, col, len ? len : 1, code, "%s", msg);
+    diag_set_phase(ctx, prev);
+}
+
+static void lx_note(Lexer *lexer, uint32 line, uint32 col, uint32 len, const char* fmt, ...) {
+    DiagnosticContext* ctx = lexer->ctx;
+    if(!ctx) call;
+
+    char msg[384];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnwrite(msg, bytes(msg), fmt, ap);
+    va_end(ap);
+
+    DiagnosticKind prev = ctx->phase;
+    diag_set_phase(ctx, DiagnosticKind:<LEXICAL);
+    diag_note_span(ctx, lexer->filename, line, col, len ? len : 1, "%s", msg);
+    diag_set_phase(ctx, prev);
+}
+
+static Token mk_err(Lexer *lexer, const char* start, const char* end, uint32 line, uint32 col) {
+    Token token = mk(lexer, TokenType:<UNDEFINED, start, end, line, col);
+    DiagnosticContext* ctx = lexer->ctx;
+
+    if(ctx && ctx->max_errors && lexer->error_count >= ctx->max_errors)
+        lexer->current = lexer->end;
+
+    call token;
+}
+
+Lexer create_lexer_n(const char* filename, const char* src, uint32 len, DiagnosticContext *ctx) {
+    Lexer lexer = { 0 };
+    if(!src) {
+        src = "\0";
+        len = 0;
+    }
+
+    const char* end = src + len;
+    if(len >= 3 && (uint8)src[0] == 0xEF && (uint8)src[1] == 0xBB && (uint8)src[2] == 0xBF && src[len] != '\0')
+        src += 3;
+
+    lexer.filename = filename ? filename : "<desconhecido>";
+    lexer.src = src;
+    lexer.current = src;
+    lexer.start = src;
+    lexer.line_start = src;
+    lexer.end = end;
+    lexer.line = 1;
+    lexer.ctx = ctx;
+    call lexer;
+}
+
+Lexer create_lexer(const char* filename, const char* src, DiagnosticContext *ctx) {
+    if(!src) src = "";
+    call create_lexer_n(filename, src, (uint32)strlen(src), ctx);
+}
+
+static void skip_trivia(Lexer *lexer) {
+    const char* peek = lexer->current;
+
+    for(;;) {
+        while(CT(*peek)& CT_BLANK) peek++;
+
+        if(*peek == '\n') {
+            peek++;
+            lexer->line++;
+            lexer->line_start = peek;
+            continue;
+        }
+
+        break;
+    }
+
+    lexer->current = peek;
+}
+
+static inline Token lex_ident(Lexer *lexer, const char* start, uint32 line, uint32 col) {
+    const char* peek = start + 1;
+    while(CT(*peek)& CT_IDENT) peek++;
+
+    if(UNLIKELY(*start == 'W') && peek == start + 1) {
+        if(*peek == '"') call lex_string_ex(lexer, start, peek, TokenType:<WSTRING_LIT, line, col);
+        if(*peek == '\'') call lex_char_ex(lexer, start, peek, TokenType:<WCHAR_LIT, line, col);
+    }
+
+    call mk(lexer, keyword_type(start, (uint32)(peek - start)), start, peek, line, col);
+}
+
+static const char* num_suffix_hint(const char* bad, uint32 n, bool is_hex, bool has_dot) {
+    if(is_hex) call "; literais hexadecimais nao aceitam sufixo";
+    if(*bad == 'e' || *bad == 'E') call "; notacao cientifica (expoente) nao e suportado";
+    if(n == 1) {
+        if(*bad == 'b') call "; dica: use 'B' maiusculo para o literal big";
+        if(*bad == 'u') call "; dica: use 'U' maiusculo para o literal sem sinal";
+        if(*bad == 'F' && has_dot) call "; dica: use 'f' maiusculo para literal float";
+        if(*bad == 'f' && !has_dot) call "; dica: 'f' so pode ser usado com ponto. ex: 1.0f";
+    }
+
+    call "";
+}
+
+static Token lex_number(Lexer *lexer, const char* start, uint32 line, uint32 col) {
+    const char* peek = start;
+    TokenType type = TokenType:<INT_LIT;
+    bool is_hex = false;
+    bool has_dot = false;
+
+    if(peek[0] == '0' && ((hexa)peek[1] | 0x20) == 'x') {
+        peek += 2;
+        const char* digits = peek;
+        while(CT(*peek)& CT_HEX) peek++;
+
+        if(UNLIKELY(peek == digits)) {
+            while(CT(*peek)& CT_IDENT) peek++;
+            lx_report(lexer, SeverityKind:<ERROR, line, col, (uint32)(peek - start), "L007",
+                    "Literal hexadecimal '%.*s' sem digitos depois de '0x'", (int32)(peek - start), start);
+            call mk_err(lexer, start, peek, line, col);
+        }
+
+        type = TokenType:<HEXA_LIT;
+        is_hex = true;
+    } else {
+        while(CT(*peek)& CT_DIGIT) peek++;
+
+        uint8 c = (uint8)*peek;
+        if(c == '.' && (CT(peek[1])& CT_DIGIT)) {
+            peek += 2;
+            while(CT(*peek)& CT_DIGIT) peek++;
+            has_dot = true;
+
+            if(*peek == 'f') {
+                peek++;
+                type = TokenType:<FLOAT_LIT;
+            }
+            else type = TokenType:<DOUBLE_LIT;
+        } else if(c == 'B') {
+            peek++;
+            type = TokenType:<BIG_LIT;
+        } else if(c == 'U') {
+            peek++;
+            type = TokenType:<UNSIGNED_LIT;
+        }
+    }
+
+    if(UNLIKELY(CT(*peek)& CT_IDENT)) {
+        const char* bad = peek;
+        while(CT(*peek)& CT_IDENT) peek++;
+        lx_report(lexer, SeverityKind:<ERROR, line, col + (uint32)(bad - start), (uint32)(peek - bad), "L008",
+                "Sufixo '%.*s' invalido no literal numerico '%.*s' (sufixos validos: B, U, e 'f')%s.",
+                (int32)(peek - bad), bad, (int32)(peek - start), start,
+                num_suffix_hint(bad, (uint32)(peek - bad), is_hex, has_dot));
+        call mk_err(lexer, start, peek, line, col);
+    }
+
+    call mk(lexer, type, start, peek, line, col);
+}
+
+static const char* scan_escape(Lexer *lexer, const char* esc) {
+    const char* peek = esc + 1;
+    uint8 c = (uint8)*peek;
+
+    if(c == 'n' || c == 't' || c == 'r' || c == '0' || c == 'a') call peek + 1;
+    if(c == 'b' || c == 'f' || c == 'v') call peek + 1;
+    if(c == '\\' || c == '\'' || c == '"') call peek + 1;
+
+    if(c == 'x') {
+        const char* d = peek + 1;
+        int32 n = 0;
+        while(n < 2 && (CT(*d)& CT_HEX)) {
+            d++;
+            n++;
+        }
+
+        if(UNLIKELY(n == 0)) {
+            lx_report(lexer, SeverityKind:<ERROR, lexer->line, lx_col(lexer, esc), (uint32)(d - esc), "L010",
+                    "Escape '\\x' sem digitos hexadecimais (esperado 1 ou 2 digitos, exemplo: '\\x1B').");
+        }
+
+        call d;
+    }
+
+    if(c == '\0' || c == '\n' || c == '\r') call peek;
+
+    const char* end = (c >= 0x80) ? skip_utf8(peek) : peek + 1;
+    lx_report(lexer, SeverityKind:<WARNING, lexer->line, lx_col(lexer, esc), (uint32)(end - esc), "L005",
+                "Sequencia de escape desconhecida '%.*s' (validas: \\n \\t \\r \\0 \\a \\b \\f \\v \\\\ \\' \\\" \\xHH)",
+                (int32)(end - esc), esc);
+    call end;
+}
+
+static Token lex_char_ex(Lexer *lexer, const char* start, const char* q, TokenType ok, uint32 line, uint32 col) {
+    const char* peek = q + 1;
+    uint8 c = (uint8)*peek;
+    uint32 open_len = (uint32)(q + 1 - start);
+
+    if(c == '\'') {
+        lx_report(lexer, SeverityKind:<ERROR, line, col, open_len + 1, "L004",
+                "Literal de caractere vazio (use '\\0' para o caractere nulo)");
+        call mk_err(lexer, start, peek + 1, line, col);
+    }
+
+    if(c == '\0' || c == '\n' || c == '\r') {
+        lx_report(lexer, SeverityKind:<ERROR, line, col, open_len, "L003",
+                "As aspas simples foram abertas mas nunca foram fechadas");
+        call mk_err(lexer, start, peek, line, col);
+    }
+
+    if(c == '\\') peek = scan_escape(lexer, peek);
+    else if(c >= 0x80) peek = skip_utf8(peek);
+    else peek++;
+
+    if(LIKELY(*peek == '\'')) call mk(lexer, ok, start, peek + 1, line, col);
+
+    const char* r = peek;
+    while(*r && *r != '\n' && *r != '\r' && *r != '\'') {
+        if(*r == '\\' && r[1] != '\0' && r[1] != '\n') r++;
+        r++;
+    }
+
+    if(*r == '\'') {
+        lx_report(lexer, SeverityKind:<ERROR, line, col, (uint32)(r + 1 - start), "L006",
+                "Literal de caractere com mais de um caractere (use aspas duplas para textos longos)");
+        call mk_err(lexer, start, r + 1, line, col);
+    }
+
+    lx_report(lexer, SeverityKind:<ERROR, line, col, open_len, "L003",
+            "As aspas simples foram abertas mas nunca foram fechadas");
+    call mk_err(lexer, start, r, line, col);
+}
+
+static Token lex_string_ex(Lexer *lexer, const char* start, const char* q, TokenType ok, uint32 line, uint32 col) {
+    const char* peek = q + 1;
+    uint32 open_len = (uint32)(q + 1 - start);
+
+    for(;;) {
+        while((CT(*peek)& CT_STOP) == 0) peek++;
+        uint8 c = (uint8)*peek;
+
+        if(LIKELY(c == '"')) call mk(lexer, ok, start, peek + 1, line, col);
+
+        if(c == '\\') {
+            peek = scan_escape(lexer, peek);
+            continue;
+        }
+
+        if(c == '\n') {
+            peek++;
+            lexer->line++;
+            lexer->line_start = peek;
+            continue;
+        }
+
+        if(c == '\r') {
+            peek++;
+            continue;
+        }
+
+        if(UNLIKELY(c == '\0') && peek != lexer->end) {
+            lx_report(lexer, SeverityKind:<ERROR, lexer->line, lx_col(lexer, peek), 1, "L012",
+                        "Byte nulo (0x00) dentro de uma string");
+            peek++;
+            continue;
+        }
+
+        lx_report(lexer, SeverityKind:<ERROR, line, col, open_len, "L002",
+                    "A string foi aberta aqui mas nunca foi fechada (faltou '\"' antes do fim do arquivo)");
+        lx_note(lexer, lexer->line, lx_col(lexer, peek), 1,
+                    "o arquivo termina aqui, ainda dentro da string aberta na linha %d", (int32)line);
+        call mk_err(lexer, start, peek, line, col);
+    }
+}
+
+static inline Token lex_char(Lexer* lx, const char* start, uint32 line, uint32 col) {
+    call lex_char_ex(lx, start, start, TokenType:<CHAR_LIT, line, col);
+}
+
+static inline Token lex_string(Lexer* lx, const char* start, uint32 line, uint32 col) {
+    call lex_string_ex(lx, start, start, TokenType:<STRING_LIT, line, col);
+}
+
+static Token lex_nul(Lexer *lexer, const char* start, uint32 line, uint32 col) {
+    if(start == lexer->end) call mk(lexer, TokenType:<EOFF, start, start, line, col);
+    lx_report(lexer, SeverityKind:<ERROR, line, col, 1, "L012", "Byte nulo (0x00) no meio do arquivo-fonte");
+    call mk_err(lexer, start, start + 1, line, col);
+}
+
+static Token lex_invalid(Lexer *lexer, const char* start, uint32 line, uint32 col) {
+    uint8 c = (uint8)*start;
+
+    if(c >= 0x80) {
+        const char* end = "";
+        uint32 cp = decode_utf8(start, &end);
+
+        if(cp == LX_BAD_CP)
+            while(((hexa)(uint8)*end& 0xC0) == 0x80) end++;
+        int32 len = (int32)(end - start);
+
+        if(cp == LX_BAD_CP)
+            lx_report(lexer, SeverityKind:<ERROR, line, col, (uint32)len, "L001",
+                        "Byte 0x%02X invalido: sequencia de UTF-8 malformada.", (uint8)c);
+        else if(cp == 0x201C || cp == 0x201D) 
+            lx_report(lexer, SeverityKind:<ERROR, line, col, (uint32)len, "L001",
+                        "Aspas tipograficas '%.*s' (U+%04X) invalidas. Use aspas duplas ASCII (\").",
+                            len, start, (uint16)cp);
+        else if(cp == 0x2018 || cp == 0x2019)
+            lx_report(lexer, SeverityKind:<ERROR, line, col, (uint32)len, "L001",
+                        "Aspas tipograficas '%.*s' (U+%04X) invalidas. Use aspas simples ASCII (').",
+                            len, start, (uint16)cp);
+        else if(cp == 0x2013 || cp == 0x2014 || cp == 0x2212)
+            lx_report(lexer, SeverityKind:<ERROR, line, col, (uint32)len, "L001",
+                        "Travessao/menos tipografico '%.*s' (U+%04X) invalido. Use '-' ASCII",
+                            len, start, (uint16)cp);
+        else if(cp == 0x00A0 || cp == 0x200B || cp == 0xFEFF)
+            lx_report(lexer, SeverityKind:<ERROR, line, col, (uint32)len, "L001",
+                        "Espaco invisivel (U+%04X) invalido no codigo. Apague ou troque por um espaco comum",
+                            (uint16)cp);
+        else
+            lx_report(lexer, SeverityKind:<ERROR, line, col, (uint32)len, "L001",
+                        "Caractere nao ASCII '%.*s' (U+%04X) invalido fora da string ou char",
+                            len, start, (uint16)cp);
+        call mk_err(lexer, start, end, line, col);
+    }
+
+    if(c >= 0x20 && c < 0x7F) {
+        const char* hint = ".";
+        if(c == '`') hint = ". Para strings use aspas duplas (\").";
+
+        lx_report(lexer, SeverityKind:<ERROR, line, col, 1, "L001",
+                    "Caractere '%c' (ASCII %d) nao faz parte da linguagem%s", c, (int32)c, hint);
+    } else {
+        lx_report(lexer, SeverityKind:<ERROR, line, col, 1, "L001",
+                    "Caractere de controle (0x%02X) invalido no codigo-fonte", (uint16)c);
+    }
+
+    call mk_err(lexer, start, start + 1, line, col);
+}
+
+static Token lex_dotdot(Lexer *lexer, const char* start, uint32 line, uint32 col) {
+    lx_report(lexer, SeverityKind:<ERROR, line, col, 2, "L011",
+                "Operador '..' invalido. Use '.' para acesso ou '...' para variadicos");
+    call mk_err(lexer, start, start + 2, line, col);
+}
+
+Token next_token(Lexer *lexer) {
+    skip_trivia(lexer);
+
+    const char* start = lexer->current;
+    lexer->start = start;
+
+    const uint32 line = lexer->line;
+    const uint32 col = lx_col(lexer, start);
+    const uint8 c = (uint8)*start;
+    const uint8 cls = lx_type[c];
+
+    if((hexa)cls& CT_IDSTART) call lex_ident(lexer, start, line, col);
+    if((hexa)cls& CT_DIGIT) call lex_number(lexer, start, line, col);
+    if(UNLIKELY(c == '\0')) call lex_nul(lexer, start, line, col);
+
+    const uint8 c1 = (uint8)start[1];
+
+    if(c == ';') TOK(TokenType:<SEMICOLON, 1);
+    if(c == ':') TOK(TokenType:<COLON, 1);
+    if(c == ',') TOK(TokenType:<COMMA, 1);
+    if(c == '(') TOK(TokenType:<OPEN_PAREN, 1);
+    if(c == ')') TOK(TokenType:<CLOSE_PAREN, 1);
+    if(c == '{') TOK(TokenType:<OPEN_BRACE, 1);
+    if(c == '}') TOK(TokenType:<CLOSE_BRACE, 1);
+    if(c == '[') TOK(TokenType:<OPEN_BRACKET, 1);
+    if(c == ']') TOK(TokenType:<CLOSE_BRACKET, 1);
+    if(c == '~') TOK(TokenType:<DESC, 1);
+    if(c == '?') TOK(TokenType:<OPTERN, 1);
+
+    if(c == '.') {
+        if(c1 == '.') {
+            if(start[2] == '.') TOK(TokenType:<ELLIPSES, 3);
+            call lex_dotdot(lexer, start, line, col);
+        }
+
+        TOK(TokenType:<DOT, 1);
+    }
+
+    if(c == '>') {
+        if(c1 == '=') TOK(TokenType:<OPGE, 2);
+        if(c1 == '>') {
+            if(start[2] == '=') TOK(TokenType:<OPSHRE, 3);
+            TOK(TokenType:<OPSHR, 2);
+        }
+
+        TOK(TokenType:<OPGT, 1);
+    }
+
+    if(c == '<') {
+        if(c1 == '<') {
+            if(start[2] == '=') TOK(TokenType:<OPSHLE, 3);
+            TOK(TokenType:<OPSHL, 2);
+        }
+
+        TOK(TokenType:<OPLT, 1);
+    }
+
+    if(c == '=') {
+        if(c1 == '=') TOK(TokenType:<OPEQ, 2);
+        TOK(TokenType:<ASSIGN, 1);
+    }
+
+    if(c == '!') {
+        if(c1 == '=') TOK(TokenType:<OPBANGE, 2);
+        TOK(TokenType:<OPBANG, 1);
+    }
+
+    if(c == '&') {
+        if(c1 == '=') TOK(TokenType:<OPANDE, 2);
+        if(c1 == '&') TOK(TokenType:<LOGAND, 2);
+        TOK(TokenType:<OPAND, 1);
+    }
+
+    if(c == '|') {
+        if(c1 == '=') TOK(TokenType:<OPORE, 2);
+        if(c1 == '|') TOK(TokenType:<LOGOR, 2);
+        TOK(TokenType:<OPOR, 1);
+    }
+
+    if(c == '^') {
+        if(c1 == '=') TOK(TokenType:<OPXORE, 2);
+        TOK(TokenType:<OPXOR, 1);
+    }
+
+    if(c == '*') {
+        if(c1 == '=') TOK(TokenType:<OPSTARE, 2);
+        TOK(TokenType:<OPSTAR, 1);
+    }
+
+    if(c == '/') {
+        if(c1 == '=') TOK(TokenType:<OPSLASHE, 2);
+        TOK(TokenType:<OPSLASH, 1);
+    }
+
+    if(c == '%') {
+        if(c1 == '=') TOK(TokenType:<OPMODE, 2);
+        TOK(TokenType:<OPMOD, 1);
+    }
+
+    if(c == '+') {
+        if(c1 == '+') TOK(TokenType:<OPPLUSPLUS, 2);
+        if(c1 == '=') TOK(TokenType:<OPPLUSE, 2);
+        TOK(TokenType:<OPPLUS, 1);
+    }
+
+    if(c == '-') {
+        if(c1 == '>') TOK(TokenType:<ARROW, 2);
+        if(c1 == '-') TOK(TokenType:<OPMINUSMINUS, 2);
+        if(c1 == '=') TOK(TokenType:<OPMINUSE, 2);
+        TOK(TokenType:<OPMINUS, 1);
+    }
+
+    if(c == '\'') call lex_char(lexer, start, line, col);
+    if(c == '"') call lex_string(lexer, start, line, col);
+
+    call lex_invalid(lexer, start, line, col);
+}

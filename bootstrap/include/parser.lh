@@ -1,0 +1,248 @@
+use target -> single
+
+extract -> "common.lh"
+extract -> "lexer.lh"
+extract -> "diagnostic.lh"
+extract -> "arena.lh"
+extract -> "types.lh"
+extract -> "string_helper.lh"
+
+preprocess SYM_BUCKETS -> 256U
+
+funcpreprocess SV_ARGS(v) -> 
+    (int32)#v.len, #v.start
+<-
+
+newtype data NodeList NodeList;
+newtype data Node Node;
+
+newtype data {
+    TokenType base;
+    View alias;
+    data Node* nested;
+
+    uint8 ptr_lvl;
+    uint32 ptr_const_mask;
+    uint32 ptr_atomic_mask;
+    bool base_const;
+    bool base_atomic;
+
+    NodeList* array_dim;
+    bool is_array;
+} TypeSpec;
+
+newtype data {
+    uint64 offset;
+    uint64 size;
+    const Typecheck* type;
+    data Node* value;
+    uint8 is_string;
+} InitItem;
+
+data Node {
+    NodeKinds kind;
+    const char* filepath;
+    uint32 line;
+    uint32 col;
+
+    data Node* next;
+
+    Typecheck resolved_type;
+    uint32 func_id;
+
+    coperate {
+        data {
+            View name;
+        } var_call;
+
+        data {
+            TypeSpec call_type;
+            View name;
+
+            bool _const;
+            bool _atomic;
+            bool _static;
+            bool _extern;
+
+            data Node* init;
+        } var_decl;
+
+        data {
+            NodeList* elements;
+            bool _zero;
+            bool dense;
+            uint32 item_count;
+            InitItem* items;
+        } init_list;
+
+        data {
+            View name;
+            NodeList* members;
+        } enum_decl;
+
+        data {
+            View name;
+            data Node* value;
+        } enum_member;
+
+        data {
+            View alias;
+            View member;
+            big resolved_type;
+        } enum_access;
+
+        data {
+            TypeSpec call_type;
+            View name;
+            NodeList* params;
+
+            bool _variadic;
+            bool _static;
+            bool _const;
+            bool _atomic;
+            bool _extern;
+            bool _inline;
+
+            data Node* body;
+        } func_decl;
+
+        data {
+            View name;
+            NodeList* args;
+        } func_call;
+
+        data {
+            data Node* result;
+        } call_statement;
+
+        data {
+            View name;
+            NodeList* members;
+            data Node* tailing;
+        } aggregate;
+
+        data {
+            data Node* base;
+            View name;
+            bool arrow;
+            uint64 offset;
+            Typecheck base_type;
+        } field_access;
+
+        data {
+            View alias;
+            TypeSpec underlying;
+        } _newtype;
+
+        data {
+            data Node* operand;
+            TokenType op;
+        } unary;
+
+        data {
+            TokenType op;
+            data Node* left;
+            data Node* right;
+        } binary;
+
+        data {
+            data Node* condition;
+            data Node* body;
+        } while_loop;
+
+        data {
+            data Node* init;
+            data Node* condition;
+            data Node* increment;
+            data Node* body;
+        } for_loop;
+
+        data {
+            data Node* condition;
+            data Node* then;
+            data Node* otherwise;
+        } if_stmt;
+
+        data {
+            TypeSpec spec;
+            data Node* operand;
+        } cast;
+
+        data {
+            LiteralKind kind;
+
+            coperate {
+                int64 i64;
+                uint64 u64;
+                double f64;
+                View character;
+                View string;
+            } value;
+        } literal;
+
+        data {
+            View name;
+        } jmp_label;
+
+        data {
+            TypeSpec spec;
+            data Node* operand;
+            bool is_expr;
+            uint64 size;
+        } _bytes;
+
+        data {
+            bool is_idx;
+            data Node* idx;
+            View field;
+            data Node* rest;
+            data Node* value;
+        } designator;
+
+        data {
+            NodeList* statements;
+        } block;
+
+        data {
+            NodeList* statements;
+        } program;
+    } ast;
+};
+
+ARRAY_DEFINE(NodeList, Node*);
+
+newtype data {
+    View name;
+    Token origin;
+    int32 prev;
+    uint32 bucket;
+    int32 depth;
+    bool is_type;
+} SymEntry;
+
+newtype data {
+    SymEntry* items;
+    uint64 count;
+    uint64 capacity;
+    int32 heads[SYM_BUCKETS];
+    int32 depth;
+} SymTable;
+
+newtype data {
+    Lexer* lexer;
+    Arena* arena;
+    const char* filename;
+    Token next;
+    Token current;
+    Token prev;
+
+    bool panic;
+    uint32 consumed;
+    int32 depth;
+
+    SymTable syms;
+    DiagnosticContext* ctx;
+} Parser;
+
+Parser create_parser(Lexer *lexer, DiagnosticContext *ctx, Arena *arena);
+Node* parse_program(Parser *parser);

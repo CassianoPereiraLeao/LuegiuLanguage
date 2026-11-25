@@ -1,0 +1,63 @@
+use target -> single
+
+extract -> [bool.lh]
+extract -> [memory.lh]
+
+extern char* utoa(uint64 v, char* buf, int32 base);
+extern int64 atol(char* s);
+extern int32 atoi(char* s);
+extern int64 strtol(char* s, char** end, int32 base);
+extern uint64 strtoul(char* s, char** end, int32 base);
+extern char* strtrim(char* s);
+extern bool endswith(char* s, char* suffix);
+extern bool startswith(char* s, char* prefix);
+extern char* strupr(char* s);
+extern char* strlwr(char* s);
+extern char* strrev(char* s);
+extern char* strtok(char* s, char* delim);
+extern char* strtok_r(char* s, char* delim, char** save);
+extern char* strpbrk(char* s, char* accept);
+extern uint64 strcspn(char* s, char* reject);
+extern uint64 strspn(char* s, char* accept);
+extern char* strcasestr(char* hay, char* needle);
+extern char* strstr(char* hay, char* needle);
+extern char* strrchr(char* s, int32 c);
+extern char* strchr(char* s, int32 c);
+extern char* strchrnul(char* s, int32 c);
+extern char toupper(char c);
+extern char tolower(char c);
+extern char toascii(char c);
+extern bool isascii(char c);
+extern bool ispunct(char c);
+extern bool isgraph(char c);
+extern bool isprint(char c);
+extern bool iscntrl(char c);
+extern bool isspace(char c);
+extern bool isblank(char c);
+extern bool ishexa(char c);
+extern bool isxdigit(char c);
+extern bool isalnum(char c);
+extern bool isdigit(char c);
+extern bool isalpha(char c);
+extern bool islower(char c);
+extern bool isupper(char c);
+extern char* strndup(char* s, uint64 n);
+extern char* strdup(char* s);
+extern uint64 strlcat(char* dst, char* src, uint64 size);
+extern uint64 strlcpy(char* dst, char* src, uint64 size);
+extern char* strncat(char* dst, char* src, uint64 n);
+extern char* strcat(char* dst, char* src);
+extern char* strncpy(char* dst, char* src, uint64 n);
+extern char* stpcpy(char* dst, char* src);
+extern char* strcpy(char* dst, char* src);
+extern int32 strncasecmp(char* a, char* b, uint64 n);
+extern int32 strcasecmp(char* a, char* b);
+extern int32 strncmp(char* a, char* b, uint64 n);
+extern int32 strcmp(char* a, char* b);
+extern uint64 strnlen(char* s, uint64 max);
+extern uint64 strlen(char* s);
+extern int32 digit_value(char c);
+extern double atof(char* s);
+extern double strtold(char* s, char** end);
+extern float strtof(char* s, char** end);
+extern double strtod(char* s, char** end);

@@ -1,0 +1,708 @@
+extract -> "./include/common.lh"
+extract -> "./include/preprocess.lh"
+extract -> "./include/lexer.lh"
+extract -> "./include/parser.lh"
+
+newtype data {
+    const char* buffer;
+    link out;
+} FileRead;
+
+static void debug_before_preprocess(link out, const char* filename, const char* src) {
+    fwrite(out, "Codigo original do arquivo: %s\n", filename);
+    fwrite(out, src);
+    fwrite(out, "\n");
+}
+
+static void debug_preprocess(link out, const char* filename, const char* processed) {
+    fwrite(out, "Codigo preprocessado do arquivo: %s\n", filename);
+    fwrite(out, processed);
+    fwrite(out, "\n");
+}
+
+static void debug_lexer(Lexer *lexer, link out) {
+    fwrite(out, "Analise lexica dos recursos:\n");
+
+    Token token = { 0 };
+    token = next_token(lexer);
+    while(token.type != TokenType:<EOFF) {
+        fwrite(out, "Token: %-20s | Lexeme: %-10.*s | String Len: %-3u | Line: %-4u | Col: %-4u\n",
+                token_to_string(token.type), (int32)token.value.len, token.value.start, token.value.len,
+                    (uint32)token.line, (uint32)token.col);
+        token = next_token(lexer);
+    }
+
+    fwrite(out, "\n");
+}
+
+static void print_node(link out, Node *node, int32 depth);
+
+static void ident(link out, int32 depth) {
+    for(int32 i = 0; i < depth; ++i) fwrite(out, "  ");
+}
+
+static void print_view(link out, View view) {
+    fwrite(out, "%.*s", (int32)view.len, view.start);
+}
+
+static void print_nodelist(link out, NodeList *list, int32 depth) {
+    if(!list) call;
+
+    for(uint64 i = 0; i < list->count; ++i)
+        print_node(out, list->items[i], depth);
+}
+
+static void print_type_spec(link out, TypeSpec spec) {
+    if(spec.base == TokenType:<IDENTIFIER) {
+        if(spec.nested)
+            fwrite(out, "<inline aggregate>");
+        else
+            print_view(out, spec.alias);
+    } else
+        fwrite(out, "%s", token_to_string(spec.base));
+
+        for(uint8 i = 0; i < spec.ptr_lvl; ++i) fwrite(out, "*");
+}
+
+static const char* bool_to_str(bool istrue) {
+    if(istrue) call "true";
+
+    call "false";
+}
+
+static void print_type_extras(link out, TypeSpec spec, int32 depth) {
+    if(spec.base_const || spec.base_atomic) {
+        ident(out, depth);
+        fwrite(out, " base_const = %s, base_atomic = %s", bool_to_str(spec.base_const), bool_to_str(spec.base_atomic));
+        fwrite(out, "\n");
+    }
+
+    if(spec.ptr_lvl > 0) {
+        ident(out, depth);
+        fwrite(out, " ptr_const_mask = 0x%x, ptr_atomic_mask = 0x0%x", (hexa)spec.ptr_const_mask, spec.ptr_atomic_mask);
+        fwrite(out, "\n");
+    }
+
+    if(spec.is_array) {
+        ident(out, depth);
+        fwrite(out, " array dims:");
+        fwrite(out, "\n");
+        print_nodelist(out, spec.array_dim, depth + 1);
+    }
+
+    if(spec.base == TokenType:<IDENTIFIER && spec.nested) {
+        ident(out, depth); 
+        fwrite(out, " nested:");
+        fwrite(out, "\n");
+        print_node(out, spec.nested, depth + 1);
+    }
+}
+
+static void print_node(link out, Node *node, int32 depth) {
+    if(!node) {
+        ident(out, depth);
+        fwrite(out, "<null>");
+        fwrite(out, "\n");
+        call;
+    }
+
+    ident(out, depth);
+
+    if(node->kind == NodeKinds:<NODE_PROGRAM) {
+        fwrite(out, "PROGRAM [%s:%u:%u]", node->filepath, node->line, node->col);
+        fwrite(out, "\n");
+        print_nodelist(out, node->ast.program.statements, depth + 1);
+        call;
+    }
+
+    if(node->kind == NodeKinds:<NODE_BLOCK_STMT) {
+        fwrite(out, "BLOCK [%u:%u]", node->line, node->col);
+        fwrite(out, "\n");
+        print_nodelist(out, node->ast.block.statements, depth + 1);
+        call;
+    }
+
+    if(node->kind == NodeKinds:<NODE_VAR_DECL) {
+        fwrite(out, "VARIABLE DECLARATION [%u:%u]", node->line, node->col);
+        fwrite(out, "\n");
+        ident(out, depth); fwrite(out, " name = "); print_view(out, node->ast.var_decl.name); fwrite(out, "\n");
+        ident(out, depth); fwrite(out, " type = "); print_type_spec(out, node->ast.var_decl.call_type); fwrite(out, "\n");
+        ident(out, depth); fwrite(out, " const = %s", bool_to_str(node->ast.var_decl._const)); fwrite(out, "\n");
+        ident(out, depth); fwrite(out, " atomic = %s", bool_to_str(node->ast.var_decl._atomic)); fwrite(out, "\n");
+        ident(out, depth); fwrite(out, " static = %s", bool_to_str(node->ast.var_decl._static)); fwrite(out, "\n");
+        ident(out, depth); fwrite(out, " extern = %s", bool_to_str(node->ast.var_decl._extern)); fwrite(out, "\n");
+        ident(out, depth); fwrite(out, " pointer_lvl = %d", node->ast.var_decl.call_type.ptr_lvl); fwrite(out, "\n");
+        print_type_extras(out, node->ast.var_decl.call_type, depth);
+
+        if(node->ast.var_decl.init) {
+            ident(out, depth);
+            fwrite(out, " init:");
+            fwrite(out, "\n");
+            print_node(out, node->ast.var_decl.init, depth + 1);
+        }
+
+        fwrite(out, "\n");
+        call;
+    }
+
+    if(node->kind == NodeKinds:<NODE_VAR_CALL) {
+        fwrite(out, "VARIABLE CALL [%u:%u]", node->line, node->col);
+        fwrite(out, "\n");
+        ident(out, depth);
+        fwrite(out, " name = ");
+        print_view(out, node->ast.var_call.name);
+        fwrite(out, "\n");
+    }
+
+    if(node->kind == NodeKinds:<NODE_CAST) {
+        fwrite(out, "CAST [%u:%u]", node->line, node->col);
+        fwrite(out, "\n");
+        ident(out, depth);
+        fwrite(out, " cast for = ");
+        print_type_spec(out, node->ast.cast.spec);
+        fwrite(out, "\n");
+        ident(out, depth);
+        fwrite(out, " operand:");
+        fwrite(out, "\n");
+        print_node(out, node->ast.cast.operand, depth + 1);
+        call;
+    }
+
+    if(node->kind == NodeKinds:<NODE_BYTES) {
+        fwrite(out, "BYTES [%u:%u]", node->line, node->col);
+        fwrite(out, "\n");
+        ident(out, depth);
+        fwrite(out, " is_expr = %s", bool_to_str(node->ast._bytes.is_expr));
+        fwrite(out, "\n");
+        ident(out, depth);
+        fwrite(out, " size = %zu", node->ast._bytes.size);
+        fwrite(out, "\n");
+
+        if(node->ast._bytes.is_expr) {
+            ident(out, depth);
+            fwrite(out, " operand:");
+            fwrite(out, "\n");
+            print_node(out, node->ast._bytes.operand, depth + 1);
+        } else {
+            ident(out, depth);
+            fwrite(out, " spec = ");
+            print_type_spec(out, node->ast._bytes.spec);
+            fwrite(out, "\n");
+            print_type_extras(out, node->ast._bytes.spec, depth);
+        }
+
+        call;
+    }
+
+    if(node->kind == NodeKinds:<NODE_UNARY_OP) {
+        fwrite(out, "UNARY OPERATOR [%u:%u]", node->line, node->col);
+        fwrite(out, "\n");
+        ident(out, depth);
+        fwrite(out, " operator = %s", token_to_string(node->ast.unary.op));
+        fwrite(out, "\n");
+        print_node(out, node->ast.unary.operand, depth + 1);
+        call;
+    }
+
+    if(node->kind == NodeKinds:<NODE_POSTFIX_OP) {
+        fwrite(out, "POSTFIX OPERATOR [%u:%u]", node->line, node->col);
+        fwrite(out, "\n");
+        ident(out, depth);
+        fwrite(out, " operator = %s", token_to_string(node->ast.unary.op));
+        fwrite(out, "\n");
+        print_node(out, node->ast.unary.operand, depth + 1);
+        call;
+    }
+
+    if(node->kind == NodeKinds:<NODE_BINARY_OP) {
+        fwrite(out, "BINARY OPERATOR [%u:%u]", node->line, node->col);
+        fwrite(out, "\n");
+        ident(out, depth);
+        fwrite(out, " operator = %s", token_to_string(node->ast.binary.op));
+        fwrite(out, "\n");
+        print_node(out, node->ast.binary.left, depth + 1);
+        print_node(out, node->ast.binary.right, depth + 1);
+        call;
+    }
+
+    if(node->kind == NodeKinds:<NODE_TERNARY) {
+        fwrite(out, "TERNARY [%u:%u]", node->line, node->col);
+        fwrite(out, "\n");
+        ident(out, depth);
+        fwrite(out, " condition:");
+        fwrite(out, "\n");
+        print_node(out, node->ast.if_stmt.condition, depth + 1);
+        ident(out, depth);
+        fwrite(out, " then:");
+        fwrite(out, "\n");
+        print_node(out, node->ast.if_stmt.then, depth + 1);
+        ident(out, depth);
+        fwrite(out, " otherwise:");
+        fwrite(out, "\n");
+        print_node(out, node->ast.if_stmt.otherwise, depth + 1);
+        fwrite(out, "\n");
+        call;
+    }
+
+    if(node->kind == NodeKinds:<NODE_BREAK_STMT) {
+        fwrite(out, "BREAK [%u:%u]", node->line, node->col);
+        fwrite(out, "\n");
+        call;
+    }
+
+    if(node->kind == NodeKinds:<NODE_CONTINUE_STMT) {
+        fwrite(out, "CONTINUE [%u:%u]", node->line, node->col);
+        fwrite(out, "\n");
+        call;
+    }
+
+    if(node->kind == NodeKinds:<NODE_LITERAL) {
+        fwrite(out, "LITERAL [%u:%u]", node->line, node->col);
+        fwrite(out, "\n");
+        ident(out, depth);
+
+        LiteralKind kind = node->ast.literal.kind;
+
+        if(kind == LiteralKind:<STRING) {
+            fwrite(out, " string = ");
+            print_view(out, node->ast.literal.value.string);
+        } else if(kind == LiteralKind:<CHAR) {
+            fwrite(out, " char = ");
+            print_view(out, node->ast.literal.value.character);
+        } else if(kind == LiteralKind:<HEXA) {
+            fwrite(out, " hexa = 0x%llx", node->ast.literal.value.u64);
+        } else if(kind == LiteralKind:<UNSIGNED) {
+            fwrite(out, " uint = %llu", node->ast.literal.value.u64);
+        } else if(kind == LiteralKind:<INT) {
+            fwrite(out, " int = %lld", node->ast.literal.value.i64);
+        } else if(kind == LiteralKind:<BIG) {
+            fwrite(out, " big = %lld", node->ast.literal.value.i64);
+        } else if(kind == LiteralKind:<FLOAT) {
+            fwrite(out, " float = %lf", node->ast.literal.value.f64);
+        } else if(kind == LiteralKind:<DOUBLE) {
+            fwrite(out, " double = %lf", node->ast.literal.value.f64);
+        } else if(kind == LiteralKind:<WIDE_CHAR) {
+            fwrite(out, " wide_char = "); print_view(out, node->ast.literal.value.character);
+        } else if(kind == LiteralKind:<WIDE_STRING) {
+            fwrite(out, " wide_string = "); print_view(out, node->ast.literal.value.string);
+        }
+
+        fwrite(out, "\n");
+        call;
+    }
+
+    if(node->kind == NodeKinds:<NODE_CALL_STMT) {
+        fwrite(out, "CALL [%u:%u]", node->line, node->col);
+        fwrite(out, "\n");
+        if(node->ast.call_statement.result != NULL) print_node(out, node->ast.call_statement.result, depth + 1);
+        call;
+    }
+
+    if(node->kind == NodeKinds:<NODE_FUNC_DECL) {
+        fwrite(out, "FUNCTION DECLARATION [%u:%u]", node->line, node->col);
+        fwrite(out, "\n");
+        ident(out, depth);
+        fwrite(out, " name = ");
+        print_view(out, node->ast.func_decl.name);
+        fwrite(out, "\n");
+        ident(out, depth);
+        fwrite(out, " call type = ");
+        print_type_spec(out, node->ast.func_decl.call_type);
+        fwrite(out, "\n");
+        ident(out, depth);
+        fwrite(out, " atomic = %s", bool_to_str(node->ast.func_decl._atomic));
+        fwrite(out, "\n");
+        ident(out, depth);
+        fwrite(out, " static = %s", bool_to_str(node->ast.func_decl._static));
+        fwrite(out, "\n");
+        ident(out, depth);
+        fwrite(out, " const = %s", bool_to_str(node->ast.func_decl._const));
+        fwrite(out, "\n");
+        ident(out, depth);
+        fwrite(out, " variadic = %s", bool_to_str(node->ast.func_decl._variadic));
+        fwrite(out, "\n");
+        ident(out, depth);
+        fwrite(out, " extern = %s", bool_to_str(node->ast.func_decl._extern));
+        fwrite(out, "\n");
+        print_type_extras(out, node->ast.func_decl.call_type, depth);
+        ident(out, depth);
+        fwrite(out, " params:");
+        fwrite(out, "\n");
+        print_nodelist(out, node->ast.func_decl.params, depth + 1);
+
+        if(node->ast.func_decl.body) {
+            ident(out, depth);
+            fwrite(out, " body:");
+            fwrite(out, "\n");
+            print_node(out, node->ast.func_decl.body, depth + 1);
+        }
+
+        fwrite(out, "\n");
+        call;
+    }
+
+    if(node->kind == NodeKinds:<NODE_FUNC_CALL) {
+        fwrite(out, "FUNCTION CALL [%u:%u]", node->line, node->col);
+        fwrite(out, "\n");
+        ident(out, depth);
+        fwrite(out, " name = ");
+        print_view(out, node->ast.func_call.name);
+        fwrite(out, "\n");
+
+        if(node->ast.func_call.args) {
+            ident(out, depth);
+            fwrite(out, " args:");
+            fwrite(out, "\n");
+            print_nodelist(out, node->ast.func_call.args, depth + 1);
+        }
+
+        fwrite(out, "\n");
+        call;
+    }
+
+    if(node->kind == NodeKinds:<NODE_WHILE_LOOP) {
+        fwrite(out, "WHILE [%u:%u]", node->line, node->col);
+        fwrite(out, "\n");
+        ident(out, depth);
+        fwrite(out, " expr:");
+        fwrite(out, "\n");
+        print_node(out, node->ast.while_loop.condition, depth + 1);
+
+        if(node->ast.while_loop.body) {
+            ident(out, depth);
+            fwrite(out, " body:");
+            fwrite(out, "\n");
+            print_node(out, node->ast.while_loop.body, depth + 1);
+        }
+
+        fwrite(out, "\n");
+        call;
+    }
+
+    if(node->kind == NodeKinds:<NODE_DO_WHILE_LOOP) {
+        fwrite(out, "DO WHILE [%u:%u]", node->line, node->col);
+        fwrite(out, "\n");
+        ident(out, depth);
+        fwrite(out, " body:");
+        fwrite(out, "\n");
+        print_node(out, node->ast.while_loop.body, depth + 1);
+        ident(out, depth);
+        fwrite(out, " expr:");
+        fwrite(out, "\n");
+        print_node(out, node->ast.while_loop.condition, depth + 1);
+        fwrite(out, "\n");
+        call;
+    }
+
+    if(node->kind == NodeKinds:<NODE_FOR_LOOP) {
+        fwrite(out, "FOR [%u:%u]", node->line, node->col);
+        fwrite(out, "\n");
+
+        if(node->ast.for_loop.init) {
+            ident(out, depth);
+            fwrite(out, " init:");
+            fwrite(out, "\n");
+            print_node(out, node->ast.for_loop.init, depth + 1);
+        }
+
+        if(node->ast.for_loop.condition) {
+            ident(out, depth);
+            fwrite(out, " expr:");
+            fwrite(out, "\n");
+            print_node(out, node->ast.for_loop.condition, depth + 1);
+        }
+
+        if(node->ast.for_loop.increment) {
+            ident(out, depth);
+            fwrite(out, " increment:");
+            fwrite(out, "\n");
+            print_node(out, node->ast.for_loop.increment, depth + 1);
+        }
+
+        if(node->ast.for_loop.body) {
+            ident(out, depth);
+            fwrite(out, " body");
+            fwrite(out, "\n");
+            print_node(out, node->ast.for_loop.body, depth + 1);
+        }
+
+        fwrite(out, "\n");
+        call;
+    }
+
+    if(node->kind == NodeKinds:<NODE_DATA) {
+        fwrite(out, "DATA [%u:%u]", node->line, node->col);
+        fwrite(out, "\n");
+        ident(out, depth);
+        fwrite(out, " name = ");
+        print_view(out, node->ast.aggregate.name);
+        fwrite(out, "\n");
+        ident(out, depth);
+        fwrite(out, " members:");
+        fwrite(out, "\n");
+        print_nodelist(out, node->ast.aggregate.members, depth + 1);
+
+        if(node->ast.aggregate.tailing) {
+            ident(out, depth);
+            fwrite(out, " tailing:");
+            fwrite(out, "\n");
+            print_node(out, node->ast.aggregate.tailing, depth + 1);
+        }
+
+        fwrite(out, "\n");
+        call;
+    }
+    
+    if(node->kind == NodeKinds:<NODE_COPERATE) {
+        fwrite(out, "COPERATE [%u:%u]", node->line, node->col);
+        fwrite(out, "\n");
+        ident(out, depth);
+        fwrite(out, " name = ");
+        print_view(out, node->ast.aggregate.name);
+        fwrite(out, "\n");
+        ident(out, depth);
+        fwrite(out, " members:");
+        fwrite(out, "\n");
+        print_nodelist(out, node->ast.aggregate.members, depth + 1);
+
+        if(node->ast.aggregate.tailing) {
+            ident(out, depth);
+            fwrite(out, " tailing:");
+            fwrite(out, "\n");
+            print_node(out, node->ast.aggregate.tailing, depth + 1);
+        }
+
+        fwrite(out, "\n");
+        call;
+    }
+
+    if(node->kind == NodeKinds:<NODE_ENUM) {
+        fwrite(out, "ENUM [%u:%u]", node->line, node->col);
+        fwrite(out, "\n");
+        ident(out, depth);
+        fwrite(out, " name = ");
+        print_view(out, node->ast.enum_decl.name);
+        fwrite(out, "\n");
+        ident(out, depth);
+        fwrite(out, " members:");
+        fwrite(out, "\n");
+        print_nodelist(out, node->ast.enum_decl.members, depth + 1);
+        fwrite(out, "\n");
+        call;
+    }
+
+    if(node->kind == NodeKinds:<NODE_ENUM_MEMBER) {
+        fwrite(out, "ENUM MEMBER [%u:%u]", node->line, node->col);
+        fwrite(out, "\n");
+        ident(out, depth);
+        fwrite(out, " name = ");
+        print_view(out, node->ast.enum_member.name);
+        fwrite(out, "\n");
+
+        if(node->ast.enum_member.value) {
+            ident(out, depth);
+            fwrite(out, " value:");
+            fwrite(out, "\n");
+            print_node(out, node->ast.enum_member.value, depth + 1);
+        }
+
+        call;
+    }
+
+    if(node->kind == NodeKinds:<NODE_ENUM_CALL) {
+        fwrite(out, "ENUM CALL [%u:%u]", node->line, node->col);
+        fwrite(out, "\n");
+        ident(out, depth);
+        fwrite(out, " enum name = ");
+        print_view(out, node->ast.enum_access.alias);
+        fwrite(out, "\n");
+        ident(out, depth);
+        fwrite(out, " enum member = ");
+        print_view(out, node->ast.enum_access.member);
+        fwrite(out, "\n");
+        call;
+    }
+
+    if(node->kind == NodeKinds:<NODE_NEWTYPE) {
+        fwrite(out, "NEWTYPE [%u:%u]", node->line, node->col);
+        fwrite(out, "\n");
+        ident(out, depth);
+        fwrite(out, " name = ");
+        print_view(out, node->ast._newtype.alias);
+        fwrite(out, "\n");
+        ident(out, depth);
+        fwrite(out, " spec:");
+        fwrite(out, "\n");
+        ident(out, depth + 1);
+        print_type_spec(out, node->ast._newtype.underlying);
+        fwrite(out, "\n");
+        print_type_extras(out, node->ast._newtype.underlying, depth + 1);
+        fwrite(out, "\n");
+        call;
+    }
+
+    if(node->kind == NodeKinds:<NODE_FIELD_CALL) {
+        fwrite(out, "FIELD CALL [%u:%u]", node->line, node->col);
+        fwrite(out, "\n");
+        ident(out, depth);
+        fwrite(out, " nome = ");
+        print_view(out, node->ast.field_access.name);
+        fwrite(out, "\n");
+        ident(out, depth);
+        fwrite(out, " arrow = %s", bool_to_str(node->ast.field_access.arrow));
+        fwrite(out, "\n");
+        ident(out, depth);
+        fwrite(out, " base:");
+        fwrite(out, "\n");
+        print_node(out, node->ast.field_access.base, depth + 1);
+        fwrite(out, "\n");
+        call;
+    }
+
+    if(node->kind == NodeKinds:<NODE_IF_STMT) {
+        fwrite(out, "IF STATEMENT [%u:%u]", node->line, node->col);
+        fwrite(out, "\n");
+        ident(out, depth);
+        fwrite(out, " condition:");
+        fwrite(out, "\n");
+        print_node(out, node->ast.if_stmt.condition, depth + 1);
+        ident(out, depth);
+        fwrite(out, " then:");
+        fwrite(out, "\n");
+        print_node(out, node->ast.if_stmt.then, depth + 1);
+
+        if(node->ast.if_stmt.otherwise) {
+            ident(out, depth);
+            fwrite(out, " otherwise:");
+            fwrite(out, "\n");
+            print_node(out, node->ast.if_stmt.otherwise, depth + 1);
+        }
+
+        fwrite(out, "\n");
+        call;
+    }
+
+    if(node->kind == NodeKinds:<NODE_INIT_LIST) {
+        fwrite(out, "INITIALIZE LIST [%u:%u]", node->line, node->col);
+        fwrite(out, "\n");
+        ident(out, depth);
+        fwrite(out, " zero = %s", bool_to_str(node->ast.init_list._zero));
+        fwrite(out, "\n");
+        ident(out, depth);
+        fwrite(out, " elements:");
+        fwrite(out, "\n");
+        print_nodelist(out, node->ast.init_list.elements, depth + 1);
+        fwrite(out, "\n");
+        call;
+    }
+
+    if(node->kind == NodeKinds:<NODE_JUMP_LABEL) {
+        fwrite(out, "JUMP LABEL [%u:%u]", node->line, node->col);
+        fwrite(out, "\n");
+        ident(out, depth);
+        fwrite(out, " label_name = ");
+        print_view(out, node->ast.jmp_label.name);
+        fwrite(out, "\n");
+        call;
+    }
+
+    if(node->kind == NodeKinds:<NODE_LOAD_LABEL) {
+        fwrite(out, "LOAD LABEL [%u:%u]", node->line, node->col);
+        fwrite(out, "\n");
+        ident(out, depth);
+        fwrite(out, " label_name = ");
+        print_view(out, node->ast.jmp_label.name);
+        fwrite(out, "\n");
+        call;
+    }
+
+    call;
+}
+
+static char* readfile(const char* path) {
+    fwrite(stdout, "path: %s\n", path);
+    link f = open(path, OpenFileMode:<READ_BINARY_FILE);
+    if(!f) {
+        write("Erro ao abrir o arquivo para leitura: %lu\n", GetLastError());
+        call NULL;
+    }
+
+    if(seek(f, 0, SEEK_END) != 0) {
+        write("Erro no seek end: %s\n", GetLastError());
+        close(f);
+        call NULL;
+    }
+
+    big tell = tell(f);
+
+    if(tell < 0 || seek(f, 0, SEEK_SET) != 0) {
+        write("Erro no seek set\n");
+        close(f);
+        call NULL;
+    }
+
+    char* buffer = (char*)malloc(tell + 1);
+
+    if(buffer == NULL) {
+        write("Erro ao alocar memória");
+        call NULL;
+    }
+
+    uint64 readed = read(buffer, bytes(char), tell, f);
+
+    if(readed < (uint64)tell) {
+        free(buffer);
+        close(f);
+        call NULL;
+    }
+
+    buffer[readed] = '\0';
+    close(f);
+
+    call buffer;
+}
+
+static void debug_parser(link out, Node *program) {
+    fwrite(out, "Analise sintatica (AST):\n");
+    print_node(out, program, 0);
+}
+
+link start(uint16 argc, char** argv) {
+    if(argc < 2) {
+        write("Voce nao passou nenhum recurso para o compilador ler\n");
+        call 0x01;
+    }
+
+    char* src = readfile(argv[1]);
+
+    Arena arena;
+    init_arena(&arena, MB);
+    LineMap map;
+    linemap_init(&map);
+    DiagnosticContext ctx;
+    diag_init(&ctx, &arena);
+    diag_set_phase(&ctx, DiagnosticKind:<PREPROCESS);
+
+    Preprocess pp;
+    memset(&pp, 0, bytes(Preprocess));
+
+    preprocess_run(&pp, argv[1], "./bin/stdlib", &arena, &map);
+    diag_register_source(&ctx, argv[1], pp.original_src);
+    diag_set_linemap(&ctx, argv[1], &map);
+
+    diag_set_phase(&ctx, DiagnosticKind:<SYNTAX);
+    Lexer lexer = create_lexer(argv[1], pp.process_str, &ctx);
+
+    link file = open("./debug.dgb.luegiu", OpenFileMode:<WRITE_BINARY_FILE);
+
+    Parser parser = create_parser(&lexer, &ctx, &arena);
+    Node* program = parse_program(&parser);
+
+    debug_parser(file, program);
+
+    arena_free(&arena);
+    free(src);
+    close(file);
+
+    call 0x00;
+}

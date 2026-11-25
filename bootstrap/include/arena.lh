@@ -1,0 +1,35 @@
+use target -> single
+
+extract -> "common.lh"
+
+preprocess ARENA_ALIGN -> 8
+preprocess ARENA_MAX_CHUNK -> (4U * 1024U * 1024U)
+
+preprocess UINT64_MAX -> 18446744073709551615U
+preprocess SIZE_MAX -> UINT64_MAX
+
+newtype data ArenaChunk ArenaChunk;
+
+data ArenaChunk {
+    data ArenaChunk* next;
+    uint64 used;
+    uint64 cap;
+    uint8 items[];
+};
+
+newtype data {
+    ArenaChunk* head;
+    ArenaChunk* cur;
+    uint64 chunk_size;
+    uint64 max_chunk;
+} Arena;
+
+void arena_oom(void);
+void init_arena(Arena *arena, uint64 size);
+link arena_alloc(Arena *arena, uint64 size);
+link arena_memdup(Arena *arena, const link src, uint64 n);
+char* arena_strndup(Arena *arena, const char* s, uint64 n);
+char* arena_strdup(Arena *arena, const char* s);
+link arena_alloc_slow(Arena *arena, uint64 size);
+void arena_free(Arena *arena);
+uint64 align_size(uint64 size, uint64 alignment);

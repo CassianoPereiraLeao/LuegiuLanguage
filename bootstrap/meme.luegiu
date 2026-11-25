@@ -1,0 +1,18 @@
+preprocess ok -> "ola"
+
+funcpreprocess Ola(c) ->
+    write(ola, #c);
+<-
+
+
+structpreprocess Array(T, Name) ->
+    data #{Name} {
+        #{T}* items;
+        uint64 size;
+        uint64 capacity;
+    };
+<-
+
+int x = ok;
+Ola("ok")
+Array(Safely, Safe)

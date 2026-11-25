@@ -1,0 +1,124 @@
+use target -> single
+
+extract -> "common.lh"
+extract -> "arena.lh"
+extract -> "preprocess.lh"
+extract -> [windows.lh]
+
+preprocess CONSOLE_RESET -> "\x1b[0m"
+preprocess CONSOLE_BOLD -> "\x1b[1m"
+preprocess CONSOLE_RED -> "\x1b[1;31m"
+preprocess CONSOLE_YELLOW -> "\x1b[1;33m"
+preprocess CONSOLE_CYAN -> "\x1b[1;36m"
+preprocess CONSOLE_GREEN -> "\x1b[1;32m"
+
+preprocess DIAG_TAB_WIDTH -> 4
+
+newtype data Diagnostic Diagnostic;
+newtype data SourceFile SourceFile;
+newtype data DiagnosticContext DiagnosticContext;
+
+newtype enum {
+    PREPROCESS,
+    LEXICAL,
+    SYNTAX,
+    SEMANTICAL,
+    INTERNAL
+} DiagnosticKind;
+
+newtype enum {
+    NOTE,
+    WARNING,
+    ERROR,
+    FATAL
+} SeverityKind;
+
+newtype enum {
+    GLOBAL,
+    LOCAL,
+} DiagnosticScope;
+
+newtype data {
+    const char* filepath;
+    uint64 line;
+    uint64 col;
+    uint64 len;
+} DiagnosticLocale;
+
+data Diagnostic {
+    DiagnosticKind kind;
+    SeverityKind severity;
+    DiagnosticLocale locale;
+    char* message;
+    const char* code;
+    data Diagnostic* next;
+};
+
+data SourceFile {
+    const char* filepath;
+    const char* src;
+    uint64 src_len;
+    uint64* line_offsets;
+    uint64 line_count;
+    LineMap* map;
+    Arena* arena;
+    bool load_failed;
+    data SourceFile* next;
+};
+
+data DiagnosticContext {
+    Arena *arena;
+    Diagnostic* first;
+    Diagnostic* last;
+    Diagnostic* cursor;
+
+    uint64 error_count;
+    uint64 warning_count;
+    uint64 note_count;
+
+    uint64 max_errors;
+    bool warning_as_error;
+    bool use_color;
+
+    DiagnosticKind phase;
+    link out;
+
+    SourceFile* sources;
+
+    DiagnosticScope scope;
+    data DiagnosticContext* parent;
+};
+
+void diag_init(DiagnosticContext *ctx, Arena *arena);
+void diag_init_global(DiagnosticContext *ctx, Arena *arena);
+void diag_init_local(DiagnosticContext *ctx, Arena *arena, DiagnosticContext *global);
+void diag_reset(DiagnosticContext *ctx);
+void diag_unregister(DiagnosticContext *ctx);
+
+void diag_set_warning_as_error(DiagnosticContext *ctx, bool value);
+void diag_set_max_errors(DiagnosticContext *ctx, uint64 max);
+void diag_set_phase(DiagnosticContext *ctx, DiagnosticKind phase);
+void diag_set_color(DiagnosticContext *ctx, bool value);
+void diag_set_output(DiagnosticContext *ctx, link out);
+
+void diag_register_source(DiagnosticContext *ctx, const char* filepath, const char* src);
+void diag_set_linemap(DiagnosticContext *ctx, const char* filepath, LineMap *map);
+void diag_resolve_location(DiagnosticContext *ctx, const char** filepath, uint64 *line);
+
+void diag_emit(DiagnosticContext *ctx, SeverityKind severity, const char* filepath, uint64 line, uint64 col, const char* code, const char* fmt, ...);
+void diag_note(DiagnosticContext *ctx, const char* filepath, uint64 line, uint64 col, const char* fmt, ...);
+void diag_warning(DiagnosticContext *ctx, const char* filepath, uint64 line, uint64 col, const char* fmt, ...);
+void diag_error(DiagnosticContext *ctx, const char* filepath, uint64 line, uint64 col, const char* fmt, ...);
+void diag_fatal(DiagnosticContext *ctx, const char* filepath, uint64 line, uint64 col, const char* fmt, ...);
+void diag_error_code(DiagnosticContext *ctx, const char* filepath, uint64 line, uint64 col, const char* code, const char* fmt, ...);
+
+void diag_emit_span(DiagnosticContext *ctx, SeverityKind severity, const char* filepath, uint64 line, uint64 col, uint64 len, const char* code, const char* fmt, ...);
+void diag_note_span(DiagnosticContext *ctx, const char* filepath, uint64 line, uint64 col, uint64 len, const char* fmt, ...);
+void diag_warning_span(DiagnosticContext *ctx, const char* filepath, uint64 line, uint64 col, uint64 len, const char* fmt, ...);
+void diag_error_span(DiagnosticContext *ctx, const char* filepath, uint64 line, uint64 col, uint64 len, const char* fmt, ...);
+void diag_fatal_span(DiagnosticContext *ctx, const char* filepath, uint64 line, uint64 col, uint64 len, const char* fmt, ...);
+
+bool has_errors(DiagnosticContext *ctx);
+uint64 diag_error_count(DiagnosticContext *ctx);
+uint64 diag_warning_count(DiagnosticContext *ctx);
+uint64 diag_report_all(DiagnosticContext *ctx);

@@ -1,0 +1,81 @@
+use target -> single
+
+extract -> [windows.lh]
+extract -> [args.lh]
+extract -> [string.lh]
+extract -> [memory.lh]
+
+preprocess WRITE_BUF_SIZE -> 512
+
+preprocess FL_LEFT  -> 1
+preprocess FL_ZERO  -> 2
+preprocess FL_PLUS  -> 4
+preprocess FL_SPACE -> 8
+preprocess FL_ALT   -> 16
+
+preprocess GENERIC_READ -> 0x80000000
+preprocess GENERIC_WRITE -> 0x40000000
+preprocess GENERIC_EXECUTE -> 0x20000000
+preprocess GENERIC_ALL -> 0x10000000
+preprocess PERM_DELETE -> 0x00010000
+preprocess READ_CONTROL -> 0x00020000
+preprocess FILE_READ_DATA -> 0x01
+preprocess FILE_WRITE_DATA -> 0x02
+preprocess FILE_APPEND_DATA -> 0x04
+preprocess FILE_READ_EA -> 0x08
+preprocess FILE_EXECUTE -> 0x20
+preprocess FILE_DELETE_CHILD -> 0x40
+preprocess FILE_READ_ATTRIBUTES -> 0x80
+preprocess FILE_WRITE_ATTRIBUTES -> 0x100
+preprocess STANDARD_RIGHTS_READ -> 0x00020000
+preprocess STANDARD_RIGHTS_WRITE -> 0x00020000
+preprocess STANDARD_RIGHTS_EXECUTE -> 0x00020000
+preprocess STANDARD_RIGHTS_ALL -> 0x001F0000
+
+preprocess FILE_SHARE_NULL -> 0x00
+preprocess FILE_SHARE_READ -> 0x01
+preprocess FILE_SHARE_WRITE -> 0x02
+preprocess FILE_SHARE_DELETE -> 0x04
+
+preprocess FILE_ATTRIBUTE_NORMAL -> 0x00
+
+preprocess CREATE_NEW -> 1
+preprocess CREATE_ALWAYS -> 2
+preprocess OPEN_EXISTING -> 3
+preprocess OPEN_ALWAYS -> 4
+preprocess TRUNCATE_EXISTING -> 5
+
+preprocess SEEK_SET -> 0
+preprocess SEEK_END -> 2
+
+preprocess stdin -> GetStdHandle(-10)
+preprocess stdout -> GetStdHandle(-11)
+preprocess stderr -> GetStdHandle(-12)
+
+newtype enum {
+    READ_FILE,
+    READ_BINARY_FILE,
+    READ_WRITE_FILE,
+    READ_WRITE_BINARY_FILE,
+    WRITE_FILE,
+    WRITE_BINARY_FILE,
+    WRITE_READ_FILE,
+    WRITE_READ_BINARY_FILE,
+    APPEND_FILE,
+    APPEND_BINARY_FILE,
+    APPEND_READ_FILE,
+    APPEND_READ_BINARTY_FILE
+} OpenFileMode;
+
+extern int32 write(char* fmt, ...);
+extern int32 fwrite(link file, char* fmt, ...);
+extern int32 fwritec(char c, link file);
+extern link open(const char* path, OpenFileMode mode);
+extern bool close(link file);
+extern int64 tell(link f);
+extern int32 seek(link f, int64 offset, int32 whence);
+extern uint64 read(link buf, uint64 size, uint64 count, link f);
+extern int32 vfwrite(link file, char* fmt, va_list ap);
+extern int32 vwrite(link file, char* fmt, va_list ap);
+extern int32 vsnwrite(char* buf, uint64 size, char* fmt, va_list ap);
+extern int32 snwrite(char* buf, uint64 size, char* fmt, ...);

@@ -1,0 +1,6 @@
+use target -> single
+
+preprocess true -> (bool)1
+preprocess false -> (bool)0
+
+newtype uint8 bool;

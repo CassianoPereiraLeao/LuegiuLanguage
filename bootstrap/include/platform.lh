@@ -1,0 +1,5 @@
+use target -> single
+
+extract -> "common.lh"
+
+bool stdlib_dir(char* out,uint64 cap);

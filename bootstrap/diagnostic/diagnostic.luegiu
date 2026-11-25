@@ -1,0 +1,498 @@
+extract -> "../include/diagnostic.lh"
+
+funcpreprocess DIAG_ISATTY(f) ->
+    __isatty(fileno(#{f}))
+<-
+
+funcpreprocess DEFINE_DIAG(NAME, SEV) ->
+    void #{NAME}(DiagnosticContext *ctx, const char* file, uint64 line, uint64 col,
+              const char* fmt, ...) {
+        va_list ap; va_start(ap, fmt);
+        emit_v(ctx, #{SEV}, file, line, col, 1, NULL, fmt, ap);
+        va_end(ap);
+    }
+<-
+
+funcpreprocess DEFINE_DIAG_SPAN(NAME, SEV) ->
+    void #{NAME}(DiagnosticContext *ctx, const char* file, uint64 line, uint64 col,
+              uint64 len, const char* fmt, ...) {
+        va_list ap; va_start(ap, fmt);
+        emit_v(ctx, #{SEV}, file, line, col, len, NULL, fmt, ap);
+        va_end(ap);
+    }
+<-
+
+static bool enable_vt(void) {
+    link h = stderr;
+    uint32 mode = 0;
+    if(!h || h == (link)-1 || !GetConsoleMode(h, &mode)) call false;
+    if((hexa)mode& 0x0004) call true;
+    call (bool)(SetConsoleMode(h, (uint32)((hexa)mode | 0x0004)) != 0);
+}
+
+static bool detect_color(link file) {
+    if(getenv("NO_COLOR")) call false;
+    if(!DIAG_ISATTY(file)) call false;
+
+    call enable_vt();
+}
+
+static const char* col_of(const DiagnosticContext *ctx, const char* c) {
+    call ctx->use_color ? c : "";
+}
+
+static char* vformat(const char* fmt, va_list ap) {
+    va_list copy;
+    va_copy(copy, ap);
+    int32 n = vsnwrite(NULL, 0, fmt, copy);
+    va_end(copy);
+    if(n < 0) call NULL;
+
+    char* buf = (char*)malloc((uint64)n + 1);
+    if(!buf) call NULL;
+    vsnwrite(buf, (uint64)n + 1, fmt, ap);
+    call buf;
+}
+
+static SourceFile* find_source(DiagnosticContext *ctx, const char* path) {
+    if(!path) call NULL;
+    for(DiagnosticContext* c = ctx; c; c = c->parent)
+        for(SourceFile* s = c->sources; s; s = s->next)
+            if(strcmp(s->filepath, path) == 0) call s;
+    call NULL;
+}
+
+static LineMap* find_linemap(DiagnosticContext *ctx, const char* path) {
+    if(!path) call NULL;
+    for(DiagnosticContext* c = ctx; c; c = c->parent)
+        for(SourceFile* s = c->sources; s; s = s->next)
+            if(s->map && strcmp(s->filepath, path) == 0) call s->map;
+    call NULL;
+}
+
+static SourceFile* own_source(DiagnosticContext *ctx, const char* path) {
+    for(SourceFile* s = ctx->sources; s; s = s->next)
+        if(strcmp(s->filepath, path) == 0) call s;
+
+    SourceFile* s = (SourceFile*)arena_alloc(ctx->arena, bytes(SourceFile));
+    if(!s) call NULL;
+    memset(s, 0, bytes(*s));
+
+    s->filepath = arena_strdup(ctx->arena, path);
+    if(!s->filepath) call NULL;
+    s->arena = ctx->arena;
+    s->next = ctx->sources;
+    ctx->sources = s;
+    call s;
+}
+
+static void index_lines(SourceFile *sf) {
+    uint64 n = 1;
+    for(uint64 i = 0; i < sf->src_len; i++)
+        if(sf->src[i] == '\n') n++;
+
+    sf->line_offsets = (uint64*)arena_alloc(sf->arena, n * bytes(uint64));
+    if(!sf->line_offsets) { sf->line_count = 0; call; }
+
+    uint64 k = 0;
+    sf->line_offsets[k++] = 0;
+    for(uint64 i = 0; i < sf->src_len; i++)
+        if(sf->src[i] == '\n') sf->line_offsets[k++] = i + 1;
+
+    sf->line_count = n;
+}
+
+static SourceFile* get_source(DiagnosticContext *ctx, const char* path) {
+    SourceFile* s = find_source(ctx, path);
+    call s ? s : own_source(ctx, path);
+}
+
+static void ensure_loaded(SourceFile *sf) {
+    if(sf->src || sf->load_failed) call;
+
+    link f = open(sf->filepath, OpenFileMode:<READ_BINARY_FILE);
+    if(!f) { 
+        sf->load_failed = true; 
+        call; 
+    }   
+
+    big size = -1;
+    if(seek(f, 0, SEEK_END) == 0) size = tell(f);
+    if(size < 0 || seek(f, 0, SEEK_SET) != 0) {
+        close(f);
+        sf->load_failed = true;
+        call;
+    }
+
+    char* buf = (char*)arena_alloc(sf->arena, (uint64)size + 1);
+    if(!buf) { 
+        close(f); 
+        sf->load_failed = true; 
+        call; 
+    }
+
+    uint64 rd = read(buf, 1, (uint64)size, f);
+    close(f);
+    buf[rd] = '\0';
+
+    sf->src = buf;
+    sf->src_len = rd;
+    index_lines(sf);
+}
+
+static bool get_line(const SourceFile *sf, uint64 line, const char** out, uint64 *len) {
+    if(!sf->src || !sf->line_offsets || line < 1 || line > sf->line_count) call false;
+
+    uint64 start = sf->line_offsets[line - 1];
+    uint64 end = (line < sf->line_count) ? sf->line_offsets[line] - 1 : sf->src_len;
+    if(end > start && sf->src[end - 1] == '\r') end--;   /* CRLF */
+
+    *out = sf->src + start;
+    *len = end - start;
+    call true;
+}
+
+void diag_register_source(DiagnosticContext *ctx, const char* filepath, const char* src) {
+    if(!ctx || !filepath || !src) call;
+
+    SourceFile* sf = own_source(ctx, filepath);
+    if(!sf) call;
+
+    uint64 n = strlen(src);
+    char* copy = (char*)arena_alloc(ctx->arena, n + 1);
+    if(!copy) call;
+    memcpy(copy, src, n + 1);
+
+    sf->src = copy;
+    sf->src_len = n;
+    sf->load_failed = false;
+    index_lines(sf);
+}
+
+void diag_set_linemap(DiagnosticContext *ctx, const char* filepath, LineMap *map) {
+    if(!ctx || !filepath) call;
+    SourceFile* sf = own_source(ctx, filepath);
+    if(sf) sf->map = map;
+}
+
+void diag_resolve_location(DiagnosticContext *ctx, const char** filepath, uint64 *line) {
+    if(!ctx || !filepath || !*filepath || !line) call;
+
+    LineMap* map = find_linemap(ctx, *filepath);
+    if(!map) call;
+
+    const char* file = NULL;
+    int32 resolved = 0;
+    linemap_resolve(map, (uint32)*line, &file, &resolved);
+
+    if(file && strcmp(file, "unknown") != 0 && resolved > 0) {
+        *filepath = file;
+        *line = (uint64)resolved;
+    }
+}
+
+void diag_init(DiagnosticContext *ctx, Arena *arena) {
+    memset(ctx, 0, bytes(*ctx));
+    ctx->arena = arena;
+    ctx->scope = DiagnosticScope:<LOCAL;
+    ctx->phase = DiagnosticKind:<INTERNAL;
+    ctx->out = stderr;
+    ctx->use_color = detect_color(stderr);
+}
+
+void diag_init_global(DiagnosticContext *ctx, Arena *arena) {
+    diag_init(ctx, arena);
+    ctx->scope = DiagnosticScope:<GLOBAL;
+}
+
+void diag_init_local(DiagnosticContext *ctx, Arena *arena, DiagnosticContext *global) {
+    diag_init(ctx, arena);
+    ctx->scope = DiagnosticScope:<LOCAL;
+    ctx->parent = global;
+}
+
+void diag_reset(DiagnosticContext *ctx) {
+    ctx->first = ctx->last = ctx->cursor = NULL;
+    ctx->error_count = ctx->warning_count = ctx->note_count = 0;
+}
+
+void diag_unregister(DiagnosticContext *ctx) {
+    ctx->sources = NULL;
+}
+
+void diag_set_warning_as_error(DiagnosticContext *ctx, bool v) { 
+    ctx->warning_as_error = v; 
+}
+
+void diag_set_max_errors(DiagnosticContext *ctx, uint64 max) { 
+    ctx->max_errors = max; 
+}
+
+void diag_set_phase(DiagnosticContext *ctx, DiagnosticKind p) { 
+    ctx->phase = p; 
+}
+
+void diag_set_color(DiagnosticContext *ctx, bool v) { 
+    ctx->use_color = v; 
+}
+
+void diag_set_output(DiagnosticContext *ctx, link out) { 
+    ctx->out = out ? out : stderr; 
+}
+
+static void push(DiagnosticContext *ctx, SeverityKind sev, const char* file,
+                 uint64 line, uint64 col, uint64 len, const char* code, const char* msg) {
+    if(sev == SeverityKind:<WARNING && ctx->warning_as_error) sev = SeverityKind:<ERROR;
+
+    const char* path = NULL;
+    if(file) {
+        SourceFile* sf = get_source(ctx, file);
+        path = sf ? sf->filepath : file;
+    }
+
+    Diagnostic* last = ctx->last;
+    if(sev != SeverityKind:<NOTE && last && last->severity == sev &&
+       last->locale.line == line && last->locale.col == col &&
+       last->locale.filepath == path && strcmp(last->message, msg) == 0)
+        call;
+
+    Diagnostic* d = (Diagnostic*)arena_alloc(ctx->arena, bytes(Diagnostic));
+    if(!d) call;
+    memset(d, 0, bytes(*d));
+
+    d->message = arena_strdup(ctx->arena, msg);
+    if(!d->message) call;
+    d->code = arena_strdup(ctx->arena, code);
+    d->kind = ctx->phase;
+    d->severity = sev;
+    d->locale.filepath = path;
+    d->locale.line = line;
+    d->locale.col = col;
+    d->locale.len = len;
+
+    if(ctx->last) ctx->last->next = d;
+    else ctx->first = d;
+    ctx->last = d;
+
+    if(sev == SeverityKind:<NOTE) {
+        ctx->note_count++;
+    } else if(sev == SeverityKind:<WARNING) {
+        ctx->warning_count++;
+    } else {
+        ctx->error_count++;
+    }
+}
+
+static void emit_v(DiagnosticContext *ctx, SeverityKind sev, const char* file,
+                   uint64 line, uint64 col, uint64 len, const char* code,
+                   const char* fmt, va_list ap) {
+    if(!ctx || !fmt) call;
+
+    char* msg = vformat(fmt, ap);
+    if(!msg) call;
+
+    if(file && line) diag_resolve_location(ctx, &file, &line);
+    push(ctx, sev, file, line, col, len, code, msg);
+    free(msg);
+
+    if(sev == SeverityKind:<FATAL) {
+        if(ctx->parent) diag_report_all(ctx->parent);
+        diag_report_all(ctx);
+        exit(ErrorCodeSystem:<COMPILE_ERROR);
+    }
+
+    if(ctx->max_errors > 0 && ctx->error_count >= ctx->max_errors) {
+        if(ctx->parent) diag_report_all(ctx->parent);
+        diag_report_all(ctx);
+        fwrite(ctx->out, "\n(Limite maximo de erros atingido: %zu)\n", ctx->max_errors);
+        exit(ErrorCodeSystem:<EXPLODE_MAX_ERRORS);
+    }
+}
+
+void diag_emit(DiagnosticContext *ctx, SeverityKind sev, const char* file, uint64 line, uint64 col, const char* code, const char* fmt, ...) {
+    va_list ap; va_start(ap, fmt);
+    emit_v(ctx, sev, file, line, col, 1, code, fmt, ap);
+    va_end(ap);
+}
+
+void diag_emit_span(DiagnosticContext *ctx, SeverityKind sev, const char* file, uint64 line, uint64 col, uint64 len, const char* code, const char* fmt, ...) {
+    va_list ap; va_start(ap, fmt);
+    emit_v(ctx, sev, file, line, col, len, code, fmt, ap);
+    va_end(ap);
+}
+
+void diag_error_code(DiagnosticContext *ctx, const char* file, uint64 line, uint64 col, const char* code, const char* fmt, ...) {
+    va_list ap; va_start(ap, fmt);
+    emit_v(ctx, SeverityKind:<ERROR, file, line, col, 1, code, fmt, ap);
+    va_end(ap);
+}
+
+DEFINE_DIAG(diag_note, SeverityKind:<NOTE)
+DEFINE_DIAG(diag_warning, SeverityKind:<WARNING)
+DEFINE_DIAG(diag_error, SeverityKind:<ERROR)
+DEFINE_DIAG(diag_fatal, SeverityKind:<FATAL)
+
+DEFINE_DIAG_SPAN(diag_note_span, SeverityKind:<NOTE)
+DEFINE_DIAG_SPAN(diag_warning_span, SeverityKind:<WARNING)
+DEFINE_DIAG_SPAN(diag_error_span, SeverityKind:<ERROR)
+DEFINE_DIAG_SPAN(diag_fatal_span, SeverityKind:<FATAL)
+
+bool has_errors(DiagnosticContext *ctx) { 
+    call (bool)(ctx && ctx->error_count > 0); 
+}
+
+uint64 diag_error_count(DiagnosticContext *ctx)   { 
+    call ctx ? ctx->error_count : 0; 
+}
+
+uint64 diag_warning_count(DiagnosticContext *ctx) { 
+    call ctx ? ctx->warning_count : 0; 
+}
+
+static const char* severity_to_string(SeverityKind kind) {
+    if(kind == SeverityKind:<NOTE) {
+        call "nota";
+    } else if(kind == SeverityKind:<WARNING) {
+        call "aviso";
+    } else if(kind == SeverityKind:<ERROR) {
+        call "erro";
+    } else if(kind == SeverityKind:<FATAL) {
+        call "fatal";
+    }
+
+    call "?";
+}
+
+static const char* severity_color(SeverityKind kind) {
+    if(kind == SeverityKind:<NOTE) {
+        call CONSOLE_CYAN;
+    } else if(kind == SeverityKind:<WARNING) {
+        call CONSOLE_YELLOW;
+    } else if(kind == SeverityKind:<ERROR && kind == SeverityKind:<FATAL) {
+        call CONSOLE_RED;
+    }
+
+    call "";
+}
+
+static uint64 visual_width(const char* s, uint64 n) {
+    uint64 w = 0;
+
+    for(uint64 i = 0; i < n; i++) {
+        char c = s[i];
+        if(c == '\t') w += DIAG_TAB_WIDTH;
+        else if(((hexa)c& 0xC0) != 0x80) w++;
+    }
+
+    call w;
+}
+
+static void print_snippet(DiagnosticContext *ctx, const Diagnostic *d) {
+    if(!d->locale.filepath || d->locale.line == 0) call;
+
+    SourceFile* sf = find_source(ctx, d->locale.filepath);
+    if(!sf) call;
+    ensure_loaded(sf);
+
+    const char* s; uint64 n;
+    if(!get_line(sf, d->locale.line, &s, &n)) call;
+
+    link out = ctx->out;
+    int32 w = 1;
+    for(uint64 t = d->locale.line; t >= 10; t /= 10) w++;
+
+    fwrite(out, " %*zu | ", w, d->locale.line);
+    for(uint64 i = 0; i < n; i++) {
+        if(s[i] == '\t') fwrite(out, "    ");
+        else fwritec(s[i], out);
+    }
+    fwritec('\n', out);
+
+    if(d->locale.col == 0) call;
+
+    uint64 c0 = d->locale.col - 1;
+    if(c0 > n) c0 = n;
+
+    uint64 end = c0 + (d->locale.len ? d->locale.len : 1);
+    if(end > n) end = n;
+
+    uint64 pad = visual_width(s, c0);
+    uint64 width = (end > c0) ? visual_width(s + c0, end - c0) : 1;
+    if(width == 0) width = 1;
+
+    fwrite(out, " %*s | ", w, "");
+    for(uint64 i = 0; i < pad; i++) fwritec(' ', out);
+    fwrite(out, "%s", col_of(ctx, severity_color(d->severity)));
+    fwritec('^', out);
+    for(uint64 i = 1; i < width; i++) fwritec('~', out);
+    fwrite(out, "%s", col_of(ctx, CONSOLE_RESET));
+    fwritec('\n', out);
+}
+
+static void print_path(link out, const char* p) {
+    for(; *p; ++p) {
+        fwritec(*p == '/' ? '\\' : *p, out);
+    }
+}
+
+static bool same_line(const Diagnostic *a, const Diagnostic *b) {
+    if(!a || !b || a->locale.line != b->locale.line) call false;
+    if(a->locale.filepath == b->locale.filepath) call true;
+    call (bool)(a->locale.filepath && b->locale.filepath &&
+           strcmp(a->locale.filepath, b->locale.filepath) == 0);
+}
+
+static void print_diagnostic(DiagnosticContext *ctx, const Diagnostic *d) {
+    link out = ctx->out;
+
+    if(d->severity == SeverityKind:<NOTE && same_line(ctx->cursor, d)) {
+        fwrite(out, "    %s= nota:%s %s\n",
+                col_of(ctx, CONSOLE_CYAN), col_of(ctx, CONSOLE_RESET), d->message);
+        call;
+    }
+
+    if(ctx->cursor && d->severity != SeverityKind:<NOTE) fwritec('\n', out);
+
+    if(d->locale.filepath) {
+        fwrite(out, col_of(ctx, CONSOLE_BOLD));
+        print_path(out, d->locale.filepath);
+        fwritec(':', out);
+        if(d->locale.line) {
+            fwrite(out, "%zu:", d->locale.line);
+            if(d->locale.col) fwrite(out, "%zu:", d->locale.col);
+        }
+        fwritec(' ', out);
+        fwrite(out, col_of(ctx, CONSOLE_RESET));
+    }
+
+    fwrite(out, "%s", col_of(ctx, severity_color(d->severity)));
+    fwrite(out, severity_to_string(d->severity));
+    if(d->code) fwrite(out, " [%s]", d->code);
+    fwrite(out, col_of(ctx, CONSOLE_RESET));
+
+    fwrite(out, ": %s%s%s\n", col_of(ctx, CONSOLE_BOLD), d->message, col_of(ctx, CONSOLE_RESET));
+
+    print_snippet(ctx, d);
+}
+
+uint64 diag_report_all(DiagnosticContext *ctx) {
+    if(!ctx) call 0;
+
+    uint64 printed = 0;
+    for(Diagnostic* d = ctx->cursor ? ctx->cursor->next : ctx->first; d; d = d->next) {
+        print_diagnostic(ctx, d);
+        ctx->cursor = d;
+        printed++;
+    }
+
+    if(printed && (ctx->error_count || ctx->warning_count)) {
+        uint64 e = ctx->error_count, w = ctx->warning_count;
+        fwritec('\n', ctx->out);
+        if(e) fwrite(ctx->out, "%zu erro%s", e, e == 1 ? "" : "s");
+        if(e && w) fwrite(ctx->out, " e ");
+        if(w) fwrite(ctx->out, "%zu aviso%s", w, w == 1 ? "" : "s");
+        fwrite(ctx->out, " gerado%s.\n", (e + w) == 1 ? "" : "s");
+    }
+
+    call ctx->error_count;
+}

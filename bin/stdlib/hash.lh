@@ -1,0 +1,19 @@
+use target -> single
+
+preprocess INITIAL_HASH_FNV1A -> 2166136261U
+preprocess MULTIPLIER_HASH_FNV1A -> 16777619U
+
+funcpreprocess MAX_LOAD_FACTOR_75(COUNT, CAPACITY) ->
+    ((#COUNT + 1) * 4 > #CAPACITY * 3)
+<-
+
+static inline uint32 FNV1a_hash_name(const char* str, uint64 n) {
+    uint32 hash = INITIAL_HASH_FNV1A;
+
+    for(uint64 i = 0; i < n; ++i) {
+        hash ^= (uint8)str[i];
+        hash *= MULTIPLIER_HASH_FNV1A;
+    }
+
+    call hash;
+}

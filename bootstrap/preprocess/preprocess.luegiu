@@ -1,0 +1,1684 @@
+extract -> "../include/preprocess.lh"
+
+static ClsMode g_cls[256];
+static uint8 g_idc[256];
+static bool g_tables_ready = false;
+
+static void process_file(Pp *c, const char* filepath, const char* src, uint64 len);
+static void scan(Pp *c, const char* peek, const char* end, StringBuilder *dest, int32 depth);
+
+static void tables_init(void) {
+    if(g_tables_ready) call;
+
+    memset(g_cls, ClsMode:<OTHER, bytes(g_cls));
+    memset(g_idc, 0, bytes(g_idc));
+
+    for(int32 ch = 'a'; ch <= 'z'; ++ch) {
+        g_cls[ch] = ClsMode:<IDENT;
+        g_idc[ch] = 1;
+    }
+
+    for(int32 ch = 'A'; ch <= 'Z'; ++ch) {
+        g_cls[ch] = ClsMode:<IDENT;
+        g_idc[ch] = 1;
+    }
+
+    g_cls['_'] = ClsMode:<IDENT;
+    g_idc['_'] = 1;
+
+    for(int32 ch = '0'; ch <= '9'; ++ch) {
+        g_cls[ch] = ClsMode:<DIGIT;
+        g_idc[ch] = 1;
+    }
+
+    g_cls[' '] = ClsMode:<WS;
+    g_cls['\t'] = ClsMode:<WS;
+    g_cls['\r'] = ClsMode:<WS;
+    g_cls['\f'] = ClsMode:<WS;
+    g_cls['\v'] = ClsMode:<WS;
+
+    g_cls['\n'] = ClsMode:<NL;
+    g_cls['"'] = ClsMode:<QUOTE;
+    g_cls['\''] = ClsMode:<APOS;
+    g_cls['/'] = ClsMode:<SLASH;
+
+    g_tables_ready = true;
+}
+
+static inline const char* skip_literal(const char* peek, const char* end) {
+    char q = *peek++;
+
+    while(peek < end) {
+        char ch = *peek;
+
+        if(ch == '\\' && peek + 1 < end && peek[1] != '\n') {
+            peek += 2;
+            continue;
+        }
+
+        if(ch == q) call peek + 1;
+
+        if(ch == '\n') call peek;
+
+        peek++;
+    }
+
+    call peek;
+}
+
+static inline bool is_comment_open(const char* peek, const char* end) {
+    if(peek >= end || peek[0] != '/') call false;
+    if((uint64)(end - peek) < COMMENT_OPEN_LEN) call false;
+    if(memcmp(peek, COMMENT_OPEN, COMMENT_OPEN_LEN) != 0) call false;
+
+    call (bool)((peek + COMMENT_OPEN_LEN >= end) || !IS_IDC(peek[COMMENT_OPEN_LEN]));
+}
+
+static inline bool is_comment_close(const char* peek, const char* end) {
+    call (bool)(peek < end && peek[0] == 'e' && (uint64)(end - peek) >= COMMENT_CLOSE_LEN &&
+            memcmp(peek, COMMENT_CLOSE, COMMENT_CLOSE_LEN) == 0);
+}
+
+static const char* skip_block_comment(const char* peek, const char* end, uint64 *nl) {
+    peek += COMMENT_OPEN_LEN;
+
+    while(peek < end) {
+        if(is_comment_close(peek, end)) call peek + COMMENT_CLOSE_LEN;
+        if(*peek == '\n' && nl) (*nl)++;
+        peek++;
+    }
+
+    call end;
+}
+
+static void sb_init(StringBuilder *sb, Arena *arena, uint32 capacity) {
+    sb->arena = arena;
+    sb->len = 0;
+    sb->capacity = capacity;
+    sb->src = arena ? (char*)arena_alloc(arena, capacity) : (char*)malloc(capacity);
+
+    if(!sb->src) {
+        fwrite(stderr, "Preprocessador: Falha ao alocar %zu bytes.\n", capacity);
+        exit(ErrorCodeSystem:<ALLOCATE_ERROR);
+    }
+
+    sb->src[0] = '\0';
+}
+
+static void sb_grow(StringBuilder *sb, uint64 extra) {
+    uint64 need = sb->len + extra + 1;
+
+    if(need < sb->len || need > (uint64)MAX_CAP) {
+        fwrite(stderr, "Preprocessador: A saida excedeu o limite de capacidade maxima de %zu MB.\n Possivel causa: macro bomb.\n", 
+            (uint64)(MAX_CAP / MB));
+        exit(ErrorCodeSystem:<BUFFER_OVERFLOW);
+    }
+
+    uint32 cap = sb->capacity ? sb->capacity : 256;
+    while(cap < need) cap <<= 1;
+    if(cap > (uint64)MAX_CAP) cap = (uint64)MAX_CAP;
+
+    if(sb->arena) {
+        char* src = (char*)arena_alloc(sb->arena, cap);
+        if(sb->len) memcpy(src, sb->src, sb->len);
+        sb->src = src;
+    } else {
+        char* src = (char*)realloc(sb->src, cap);
+        if(!src) {
+            fwrite(stderr, "Preprocessador: Falha ao alocar %zu bytes.\n", cap);
+            exit(ErrorCodeSystem:<ALLOCATE_ERROR);
+        }
+
+        sb->src = src;
+    }
+
+    sb->capacity = cap;
+}
+
+static inline void sb_write(StringBuilder *sb, const char* string, uint64 len) {
+    if(len == 0) call;
+    if(UNLIKELY(sb->len + len + 1 > sb->capacity)) sb_grow(sb, len);
+    memcpy(sb->src + sb->len, string, len);
+    sb->len += len;
+}
+
+static inline void sb_writec(StringBuilder *sb, const char c) {
+    if(UNLIKELY(sb->len + 2 > sb->capacity)) sb_grow(sb, 1);
+    sb->src[sb->len++] = c;
+}
+
+void linemap_init(LineMap *map) {
+    map->count = 0;
+    map->capacity = 0;
+    map->v = NULL;
+}
+
+static void linemap_push(LineMap *map, Arena *arena, uint32 out, uint32 src, const char* filename) {
+    if(!map) call;
+
+    if(map->count && map->v[map->count - 1].out == out) {
+        map->v[map->count - 1].src = src;
+        map->v[map->count - 1].filename = filename;
+        call;
+    }
+
+    if(map->count == map->capacity) {
+        uint32 ncap = map->capacity ? map->capacity << 1 : 256;
+        LineMapEntry* nv = (LineMapEntry*)arena_alloc(arena, ncap * bytes(LineMapEntry));
+        if(map->count) memcpy(nv, map->v, map->count * bytes(LineMapEntry));
+        map->v = nv;
+        map->capacity = ncap;
+    }
+
+    LineMapEntry* entry = &map->v[map->count++];
+    entry->out = out;
+    entry->src = src;
+    entry->filename = filename;
+}
+
+void linemap_resolve(LineMap *map, uint32 out, const char** file_out, int32 *line_out) {
+    if(!map || map->count == 0) {
+        *file_out = "unknown";
+        *line_out = (int32)out;
+        call;
+    }
+
+    uint32 low = 0;
+    uint32 high = map->count;
+
+    while(low < high) {
+        uint32 mid = low + (high - low) / 2;
+        if(map->v[mid].out <= out) low = mid + 1;
+        else high = mid;
+    }
+
+    const LineMapEntry* entry = &map->v[low ? low - 1 : 0];
+    *file_out = entry->filename;
+    *line_out = (int32)(entry->src + (out - entry->out));
+}
+
+static char* get_dir(const char* filepath, Arena *arena) {
+    const char* separe = NULL;
+
+    for(const char* peek = filepath; *peek; ++peek)
+        if(*peek == '/' || *peek == '\\') separe = peek;
+
+    if(!separe) call arena_strndup(arena, ".", 1);
+
+    uint64 n = (uint64)(separe - filepath);
+    call arena_strndup(arena, filepath, n ? n : 1);
+}
+
+static char* join_path(const char* dir, const char* filepath, Arena *arena) {
+    uint64 dir_len = strlen(dir);
+    uint64 file_len = strlen(filepath);
+    char* path = (char*)arena_alloc(arena, dir_len + file_len + 2);
+    memcpy(path, dir, dir_len);
+
+    if(dir_len > 0 && dir[dir_len - 1] != '/' && dir[dir_len - 1] != '\\')
+        path[dir_len++] = '/';
+
+    memcpy(path + dir_len, filepath, file_len);
+    path[dir_len + file_len] = '\0';
+    call path;
+}
+
+static bool path_is_absolute(const char* filepath) {
+    if(filepath[0] == '/' || filepath[0] == '\\') call true;
+    if(filepath[0] != '\0' && filepath[1] == ':') call true;
+
+    call false;
+}
+
+static char* canonical_path(const char* path, Arena *arena) {
+    char buffer[PATH_MAX];
+
+    if(_fullpath(buffer, path, bytes(buffer))) call arena_strdup(arena, buffer);
+
+    call arena_strdup(arena, path);
+}
+
+static char* read_content(const char* path, Arena *arena, uint32 *out_len) {
+    link f = open(path, OpenFileMode:<READ_BINARY_FILE);
+    if(!f) call NULL;
+
+    if(seek(f, 0, SEEK_END) != 0) {
+        close(f);
+        call NULL;
+    }
+
+    big tell = tell(f);
+
+    if(tell < 0 || seek(f, 0, SEEK_SET) != 0) {
+        close(f);
+        call NULL;
+    }
+
+    if((uint64)tell > MAX_CAP_PER_FILE) {
+        fwrite(stderr, "Preprocessador: Arquivo '%s' excede o limite maximo por arquivo: %zu MB.\n",
+                path, (uint64)(MAX_CAP_PER_FILE / MB));
+        close(f);
+        exit(ErrorCodeSystem:<BUFFER_OVERFLOW);
+    }
+
+    char* buffer = (char*)arena_alloc(arena, (uint64)tell + 1);
+    uint64 nread = read(buffer, 1, (uint64)tell, f);
+
+    if(nread < (uint64)tell) {
+        fwrite(stderr, "Preprocessador: Bytes lidos sao menores que os bytes do arquivo '%s'.\n", path);
+        close(f);
+        exit(ErrorCodeSystem:<READFILE_ERROR);
+    }
+
+    buffer[nread] = '\0';
+    close(f);
+
+    if(memchr(buffer, '\0', nread) != NULL) {
+        fwrite(stderr, "Preprocessador: Arquivo '%s' contem byte nulo.\n", path);
+        exit(ErrorCodeSystem:<READFILE_ERROR);
+    }
+
+    if(nread >= 3 && (uint8)buffer[0] == 0xEF && (uint8)buffer[1] == 0xBB && (uint8)buffer[2] == 0xBF) {
+        buffer += 3;
+        nread -= 3;
+    }
+
+    *out_len = (uint32)nread;
+    call buffer;
+}
+
+static char* resolve_path(const char* root, const char* filepath, Arena *arena) {
+    if(path_is_absolute(filepath)) {
+        fwrite(stderr, "Preprocessador: Caminho invalido no extract: '%s'.\n", filepath);
+        exit(ErrorCodeSystem:<WRONG_PATH);
+    }
+
+    call join_path(root, filepath, arena);
+}
+
+static IncludePolicy use_policy_directive(const char* src, const char** out) {
+    IncludePolicy policy = IncludePolicy:<MULTIPLE;
+    const char* peek = src;
+
+    while(*peek == ' ' || *peek == '\t') peek++;
+
+    if(strncmp(peek, "target", 6) != 0 || IS_IDC(peek[6])) {
+        *out = src;
+        call policy;
+    }
+
+    peek += 6;
+
+    while(*peek == ' ' || *peek == '\t') peek++;
+
+    if(peek[0] != '-' || peek[1] != '>') {
+        *out = src;
+        call policy;
+    }
+
+    peek += 2;
+
+    while(*peek == ' ' || *peek == '\t') peek++;
+
+    if(strncmp(peek, "single", 6) == 0 && !IS_IDC(peek[6])) {
+        policy = IncludePolicy:<SINGLE;
+        peek += 6;
+    } else if(strncmp(peek, "multiple", 8) == 0 && !IS_IDC(peek[8])) {
+        policy = IncludePolicy:<MULTIPLE;
+        peek += 8;
+    } else {
+        fwrite(stderr, "Preprocessador: Target do use invalido. Usos: 'use target -> single' ou 'use target -> multiple'.\n");
+        exit(ErrorCodeSystem:<INVALID_USE_TARGET);
+    }
+
+    while(*peek && *peek != '\n') peek++;
+
+    if(*peek == '\n') peek++;
+
+    *out = peek;
+    call policy;
+}
+
+static bool target_is_single(const char* src, uint64 len) {
+    const char* end = src + len;
+    const char* peek = src;
+
+    for(;;) {
+        while(peek < end && (*peek == ' ' || *peek == '\t' || *peek == '\r' || *peek == '\n')) peek++;
+
+        if(peek + 1 < end && peek[0] == '/' && peek[1] == '/') {
+            while(peek < end && *peek != '\n') peek++;
+            continue;
+        }
+
+        if(is_comment_open(peek, end)) {
+            peek = skip_block_comment(peek, end, NULL);
+            continue;
+        }
+
+        break;
+    }
+
+    if(strncmp(peek, "use", 3) != 0 || IS_IDC(peek[3])) call false;
+
+    const char* pass_key = peek + 3;
+    while(*pass_key == ' ' || *pass_key == '\t') pass_key++;
+
+    const char* pass = pass_key;
+    IncludePolicy policy = use_policy_directive(pass_key, &pass);
+    if(pass != pass_key) call (bool)(policy == IncludePolicy:<SINGLE);
+
+    call false;
+}
+
+static void pp_error(Pp *c, ErrorCodeSystem code, const char* fmt, ...) {
+    va_list ap;
+    fwrite(stderr, "Preprocessador: %s:%zu: ", c->cur_file ? c->cur_file : "?", c->src_line);
+    va_start(ap, fmt);
+    vfwrite(stderr, fmt, ap);
+    va_end(ap);
+    fwritec('\n', stderr);
+    exit(code);
+}
+
+static void depth_error(Pp *c, Macro *macro) {
+    pp_error(c, ErrorCodeSystem:<MACRO_ERROR, "Expansao de macros muito profunda (limite %d) em '%.*s'",
+                MAX_EXPANSION_DEPTH, (int32)macro->name_len, macro->name);
+}
+
+static bool path_equal(const char* a, const char* b) {
+    call (bool)(strcmp(a, b) == 0);
+}
+
+static void link_add(Pp *c, const char* path, LinkKind kind) {
+    for(LinkItem* item = c->links; item != NULL; item = item->next) 
+        if(item->kind == kind && path_equal(item->path, path)) call;
+
+    LinkItem* n = (LinkItem*)arena_alloc(c->arena, bytes(LinkItem));
+    n->path = arena_strdup(c->arena, path);
+    n->kind = kind;
+    n->next = NULL;
+
+    if(c->links_tail) c->links_tail->next = n;
+    else c->links = n;
+
+    c->links_tail = n;
+    c->link_count++;
+}
+
+static char* obj_path_for(Pp *c, const char* resolved) {
+    uint64 n = strlen(resolved);
+    char* o = (char*)arena_alloc(c->arena, n + 3);
+    memcpy(o, resolved, n - 3);
+    memcpy(o + n - 3, ".obj", 5);
+    call o;
+}
+
+static bool include_verify(Pp *c, const char* filepath) {
+    for(IncludeFile* file = c->included; file != NULL; file = file->next)
+        if(path_equal(file->path, filepath)) call true;
+
+    call false;
+}
+
+static void include_add(Pp *c, const char* path) {
+    IncludeFile* file = (IncludeFile*)arena_alloc(c->arena, bytes(IncludeFile));
+    file->path = arena_strdup(c->arena, path);
+    file->next = c->included;
+    c->included = file;
+}
+
+static Level* get_level(Pp *c, int32 depth) {
+    Level* level = c->levels[depth];
+
+    if(UNLIKELY(!level)) {
+        level = (Level*)calloc(1, bytes(Level));
+
+        if(!level) {
+            fwrite(stderr, "Preprocessador: falha ao alocar nivel de expensao.\n");
+            exit(ErrorCodeSystem:<LEVEL_ERROR);
+        }
+
+        c->levels[depth] = level;
+    }
+
+    call level;
+}
+
+static void table_grow(Pp *c) {
+    uint64 ncap = c->table_cap ? c->table_cap << 1 : 64;
+    Macro** nt = (Macro**)calloc(ncap, bytes(Macro*));
+
+    if(!nt) {
+        fwrite(stderr, "Preprocessador: Falha ao alocar table de macros.\n");
+        exit(ErrorCodeSystem:<ALLOCATE_ERROR);
+    }
+
+    for(uint64 i = 0; i < c->table_cap; ++i) 
+        for(Macro* macro = c->table[i]; macro != NULL; ) {
+            Macro* next = macro->next;
+            uint64 idx = macro->hash& (ncap - 1);
+            macro->next = nt[idx];
+            nt[idx] = macro;
+            macro = next;
+        }
+
+    free(c->table);
+    c->table = nt;
+    c->table_cap = (uint32)ncap;
+}
+
+static Macro* macro_find(Pp *c, const char* str, uint64 n, uint32 hash) {
+    if(!c->table_cap) call NULL;
+
+    for(Macro* macro = c->table[hash& (c->table_cap - 1)]; macro != NULL; macro = macro->next)
+        if(macro->hash == hash && macro->name_len == n && memcmp(macro->name, str, n) == 0) call macro;
+
+    call NULL;
+}
+
+static inline Macro* macro_lookup(Pp *c, const char* str, uint64 n) {
+    uint8 f = (uint8)str[0];
+    if(!(c->first_mask[f >> 5]& (1U << (f& 31)))) call NULL;
+    if(!(c->len_mask& (1U << (n < 31 ? n : 31)))) call NULL;
+
+    call macro_find(c, str, n, FNV1a_hash_name(str, n));
+}
+
+static void macro_define(Pp *c, const Macro* define) {
+    Macro temp = *define;
+    temp.hash = FNV1a_hash_name(temp.name, temp.name_len);
+
+    Macro* old = macro_find(c, temp.name, temp.name_len, temp.hash);
+    if(old != NULL) {
+        bool same = (bool)(old->kind == temp.kind && old->nparams == temp.nparams && old->value_len == temp.value_len &&
+                        (temp.value_len == 0 || memcmp(old->value, temp.value, temp.value_len) == 0));
+
+        if(!same)
+            fwrite(stderr, "Preprocessador: %s:%zu: Aviso: Macro '%.*s' redefinido\n",
+                    c->cur_file, c->src_line, (int32)temp.name_len, temp.name);
+
+        Macro* next = old->next;
+        *old = temp;
+        old->next = next;
+        call;
+    }
+
+    if(MAX_LOAD_FACTOR_75(c->table_count, c->table_cap)) table_grow(c);
+
+    Macro* macro = (Macro*)arena_alloc(c->arena, bytes(Macro));
+    *macro = temp;
+
+    uint64 idx = macro->hash& (c->table_cap - 1);
+    macro->next = c->table[idx];
+    c->table[idx] = macro;
+    c->table_count++;
+
+    uint8 f = (uint8)macro->name[0];
+    c->first_mask[f >> 5] |= 1U << (f& 31);
+    c->len_mask |= 1U << (macro->name_len < 31 ? macro->name_len : 31);
+}
+
+static void builtin_define(Pp *c, const char* name, MacroKind kind) {
+    Macro macro = { 0 };
+    memset(&macro, 0, bytes(Macro));
+    macro.name = name;
+    macro.name_len = (uint32)strlen(name);
+    macro.kind = kind;
+    macro_define(c, &macro);
+}
+
+static bool name_is_reserved(const char* str, uint64 n) {
+    call (bool)((n == 8 && memcmp(str, "__LINE__", 8) == 0) ||
+                (n == 8 && memcmp(str, "__FILE__", 8) == 0 ) ||
+                (n == 11 && memcmp(str, "__COUNTER__", 11) == 0 ));
+}
+
+static void write_newlines(Pp *c, uint64 n) {
+    for(uint64 i = 0; i < n; ++i) 
+        sb_writec(c->sb, '\n');
+
+    c->out_line += n;
+    c->src_line += n;
+}
+
+static bool value_has_ident(const char* str, uint64 n) {
+    uint64 i = 0;
+
+    while(i < n) {
+        uint8 ch = (uint8)str[i];
+
+        if(ch == '"' || ch == '\'') {
+            i = (uint64)(skip_literal(str + i, str + n) - str);
+            continue;
+        }
+
+        if(CLS(ch) == ClsMode:<IDENT) call true;
+
+        if(CLS(ch) == ClsMode:<DIGIT) {
+            while(i < n && (IS_IDC(str[i]) || str[i] == '.')) i++;
+            continue;
+        }
+
+        i++;
+    }
+
+    call false;
+}
+
+static const char* handle_preprocess(Pp *c, const char* peek) {
+    const char* end = c->cur_end;
+
+    while(*peek == ' ' || *peek == '\t') peek++;
+    if(CLS(*peek) != ClsMode:<IDENT)
+        pp_error(c, ErrorCodeSystem:<INVALID_PREPROCESS, "Esperado o nome do macro depois de 'preprocess'");
+
+    const char* name = peek;
+    while(IS_IDC(*peek)) peek++;
+    uint32 name_len = (uint32)(peek - name);
+
+    if(name_is_reserved(name, name_len)) 
+        pp_error(c, ErrorCodeSystem:<RESERVED_NAME, "'%.*s' e um nome reservado", (int32)name_len, name);
+
+    if(*peek == '(')
+        pp_error(c, ErrorCodeSystem:<INVALID_PREPROCESS, 
+                    "'%.*s': 'preprocess' nao aceita parametros (use 'funcpreprocess' ou 'structpreprocess')",
+                        (int32)name_len, name);
+    
+    Macro macro = { 0 };
+    memset(&macro, 0, bytes(Macro));
+    macro.name = name;
+    macro.name_len = name_len;
+    macro.kind = MacroKind:<OBJECT;
+
+    while(*peek == ' ' || *peek == '\t') peek++;
+    if(peek[0] == '-' && peek[1] == '>') {
+        peek += 2;
+        while(*peek == ' ' || *peek == '\t') peek++;
+    } else if(!(*peek == '\0' || *peek == '\n' || *peek == '\r' ||
+                (peek[0] == '/' && peek[1] == '/') || is_comment_open(peek, end)))
+        pp_error(c, ErrorCodeSystem:<INVALID_PREPROCESS, "Esperado '->' depois de '%.*s'", (int32)name_len, name);
+
+    StringBuilder* v = &c->temp;
+    v->len = 0;
+    uint64 consumed = 0;
+
+    for(;;) {
+        uint8 ch = (uint8)*peek;
+
+        if(ch == '\0') break;
+
+        if(ch == '\n') {
+            peek++;
+            consumed++;
+            break;
+        }
+        
+        if(ch == '\\') {
+            const char* q = peek + 1;
+            
+            if(*q == '\r') q++;
+
+            if(*q == '\n') {
+                peek = q + 1;
+                consumed++;
+                sb_writec(v, ' ');
+                continue;
+            }
+        }
+
+        if(ch == '"' || ch == '\'') {
+            const char* skip = skip_literal(peek, end);
+            sb_write(v, peek, (uint64)(skip - peek));
+            peek = skip;
+            continue;
+        }
+
+        if(ch == '/' && peek[1] == '/') {
+            while(*peek && *peek != '\n') peek++;
+            continue;
+        }
+
+        if(is_comment_open(peek, end)) {
+            peek = skip_block_comment(peek, end, &consumed);
+            sb_writec(v, ' ');
+            continue;
+        }
+
+        sb_writec(v, (char)ch);
+        peek++;
+    }
+
+    while(v->len && IS_WS(v->src[v->len - 1])) v->len--;
+
+    uint64 lead = 0;
+    while(lead < v->len && IS_WS(v->src[lead])) lead++;
+    uint64 vlen = v->len - lead;
+
+    char* value = (char*)arena_alloc(c->arena, vlen + 1);
+    if(vlen) memcpy(value, v->src + lead, vlen);
+    value[vlen] = '\0';
+    macro.value = value;
+    macro.value_len = (uint32)vlen;
+    macro.has_ident = value_has_ident(value, vlen);
+
+    macro_define(c, &macro);
+
+    write_newlines(c, consumed);
+    call peek;
+}
+
+static const char* find_block_end(const char* peek, const char* end, const char* start) {
+    while(peek < end) {
+        char ch = *peek;
+
+        if(ch == '"' || ch == '\'') {
+            peek = skip_literal(peek, end);
+            continue;
+        }
+
+        if(is_comment_open(peek, end)) {
+            peek = skip_block_comment(peek, end, NULL);
+            continue;
+        }
+
+        if(ch == '<' && peek + 1 < end && peek[1] == '-') {
+            bool ok = (bool)((peek == start) || peek[-1] == ' ' || peek[-1] == '\t' || peek[-1] == '\n' || peek[-1] == '\r');
+            if(ok) {
+                const char* q = peek + 2;
+                while(q < end && (*q == ' ' || *q == '\t' || *q == '\r')) q++;
+
+                if(q >= end || *q == '\n' || (q + 1 < end && q[0] == '/' && q[1] == '/')) call peek;
+            }
+        }
+
+        peek++;
+    }
+
+    call NULL;
+}
+
+static int32 param_index(const char* str, uint64 n, const char* pn[], const uint64 pl[], int32 np) {
+    for(int32 i = 0; i < np; ++i)
+        if(pl[i] == n && memcmp(pn[i], str, n) == 0) call i;
+
+    call -1;
+}
+
+static void compile_template(Pp *c, Macro *macro, const char* pn[], const uint64 pl[]) {
+    const char* buffer = macro->value;
+    uint64 value_len = macro->value_len;
+
+    MacroPart* temp = (MacroPart*)malloc((2 * value_len + 2) * bytes(MacroPart));
+
+    if(temp == NULL) {
+        fwrite(stderr, "Preprocessador: Falha ao alocar o corpo do modelo.\n");
+        exit(ErrorCodeSystem:<ALLOCATE_ERROR);
+    }
+
+    uint64 np = 0;
+    uint64 i = 0;
+    uint64 ts = 0;
+
+    while(i < value_len) {
+        uint8 ch = (uint8)buffer[i];
+
+        if(ch == '"' || ch == '\'') {
+            i = (uint64)(skip_literal(buffer + i, buffer + value_len) - buffer);
+            continue;
+        }
+
+        if(ch == '#' && macro->nparams > 0) {
+            int32 best = -1;
+            uint64 consume = 0;
+
+            if(i + 1 < value_len && buffer[i + 1] == '{') {
+                uint64 j = i + 2;
+                while(j < value_len && IS_IDC(buffer[j])) j++;
+                if(j < value_len && buffer[j] == '}' && j > i + 2) {
+                    int32 k = param_index(buffer + i + 2, j - (i + 2), pn, pl, macro->nparams);
+                    if(k >= 0) {
+                        best = k;
+                        consume = j + 1 - i;
+                    }
+                }
+            } else {
+                uint64 j = i + 1;
+                while(j < value_len && IS_IDC(buffer[j])) j++;
+                if(j > i + 1) {
+                    int32  k = param_index(buffer + i + 1, j - (i + 1), pn, pl, macro->nparams);
+                    if(k >= 0) {
+                        best = k;
+                        consume = j - i;
+                    }
+                }
+            }
+
+            if(best >= 0) {
+                FLUSH_TEXT(i);
+                temp[np].text = NULL;
+                temp[np].len = 0;
+                temp[np].param = best;
+                temp[np].kind = MacroPartKind:<PARAM;
+                np++;
+                i += consume;
+                ts = i;
+                continue;
+            }
+        }
+
+        i++;
+    }
+
+    FLUSH_TEXT(value_len);
+
+    macro->nparts = (uint32)np;
+    macro->parts = NULL;
+
+    if(np) {
+        macro->parts = (MacroPart*)arena_alloc(c->arena, np * bytes(MacroPart));
+        memcpy(macro->parts, temp, np * bytes(MacroPart));
+    }
+
+    free(temp);
+}
+
+static const char* find_call_end(const char* open, const char* end, bool *needs_norm, uint64 *out) {
+    int32 depth = 0;
+    const char* str = open;
+
+    while(str < end) {
+        if(*str == '(') {
+            depth++;
+            str++;
+            continue;
+        }
+
+        if(*str == ')') {
+            if(--depth == 0) call str + 1;
+            str++;
+            continue;
+        }
+
+        if(*str == '"' || *str == '\'') {
+            str = skip_literal(str, end);
+            continue;
+        }
+
+        if(*str == '\n') {
+            (*out)++;
+            *needs_norm = true;
+            str++;
+            continue;
+        }
+
+        if(*str == '/') {
+            if(str + 1 < end && str[1] == '/') {
+                *needs_norm = true;
+                str += 2;
+                while(str < end && *str != '\n') str++;
+            } else if(is_comment_open(str, end)) {
+                *needs_norm = true;
+                str = skip_block_comment(str, end, out);
+            } else {
+                str++;
+            }
+
+            continue;
+        }
+
+        str++;
+    }
+
+    call NULL;
+}
+
+static void normalize_call(StringBuilder *out, const char* str, const char* end) {
+    out->len = 0;
+
+    while(str < end) {
+        uint8 ch = (uint8)*str;
+
+        if(ch == '"' || ch == '\'') {
+            const char* q = skip_literal(str, end);
+            sb_write(out, str, (uint64)(q - str));
+            str = q;
+        } else if(ch == '\n' || ch == '\r') {
+            sb_writec(out, ' ');
+            str++;
+        } else if(ch == '/' && str + 1 < end && str[1] == '/') {
+            while(str < end && *str != '\n') str++;
+            sb_writec(out, ' ');
+        } else if(is_comment_open(str, end)) {
+            str = skip_block_comment(str, end, NULL);
+            sb_writec(out, ' ');
+        } else {
+            sb_writec(out, (char)ch);
+            str++;
+        }
+    }
+}
+
+static void trim_span(const char** str, const char** end) {
+    while(*str < *end && IS_WS(**str)) (*str)++;
+    while(*end > *str && IS_WS((*end)[-1])) (*end)--;
+}
+
+static const char* parse_call(Pp *c, Macro *macro, Level *level, const char* open, const char* end, uint64 *out) {
+    bool needs_norm = false;
+    uint64 nl = 0;
+
+    const char* close = find_call_end(open, end, &needs_norm, &nl);
+    if(!close) 
+        pp_error(c, ErrorCodeSystem:<MACRO_ERROR, "Chamada de '%.*s' sem ')' de fechamento.", (int32)macro->name_len, macro->name);
+
+    const char* inner = open + 1;
+    const char* inner_end = close - 1;
+
+    if(needs_norm) {
+        normalize_call(&level->norm, inner, inner_end);
+        inner = level->norm.src;
+        inner_end = inner + level->norm.len;
+    }
+
+    int32 count = 0;
+    const char* str = inner;
+    const char* t = inner;
+    int32 pd = 0;
+
+    for(;;) {
+        while(t < inner_end) {
+            uint8 ch = (uint8)*t;
+
+            if(ch == '"' || ch == '\'') {
+                t = skip_literal(t, inner_end);
+                continue;
+            }
+
+            if(ch == '(' || ch == '[' || ch == '{') pd++;
+            else if(ch == ')' || ch == ']' || ch == '}') pd--;
+            else if(ch == ',' && pd == 0) break;
+
+            t++;
+        }
+
+        if(count >= MAX_MACRO_PARAMS)
+            pp_error(c, ErrorCodeSystem:<MACRO_ERROR, "Argumentos exceden o limite na chamada de '%.*s'", (int32)macro->name_len, macro->name);
+
+        const char* as = str;
+        const char* ae = t;
+        trim_span(&as, &ae);
+        level->args[count].raw = as;
+        level->args[count].raw_len = (uint32)(ae - as);
+        count++;
+
+        if(t >= inner_end) break;
+        t++;
+        str = t;
+    }
+
+    if(macro->nparams == 0) {
+        if(!(count == 1 && level->args[0].raw_len == 0))
+            pp_error(c, ErrorCodeSystem:<MACRO_ERROR, "'%.*s' nao recebe argumentos", (int32)macro->name_len, macro->name);
+    } else if(count != macro->nparams) {
+        pp_error(c, ErrorCodeSystem:<MACRO_ERROR, "'%.*s' espera %d argumento(s), mas recebeu %d.",
+                    (int32)macro->name_len, macro->name, macro->nparams, count);
+    }
+
+    *out = nl;
+    call close;
+}
+
+static bool arg_has_macro(Pp *c, const char* str, uint64 len) {
+    uint64 i = 0;
+    while(i < len) {
+        uint8 ch = (uint8)str[i];
+
+        if(ch == '"' || ch == '\'') {
+            i = (uint64)(skip_literal(str + i, str + len) - str);
+            continue;
+        }
+
+        if(CLS(ch) == ClsMode:<DIGIT) {
+            while(i < len && (IS_IDC(str[i]) || str[i] == '.')) ++i;
+            continue;
+        }
+
+        if(CLS(ch) == ClsMode:<IDENT) {
+            uint64 st = i;
+            while(i < len && IS_IDC(str[i])) ++i;
+            Macro* macro = macro_lookup(c, str + st, i - st);
+            if(macro && !macro->disable) call true;
+            continue;
+        }
+
+        ++i;
+    }
+
+    call false;
+}
+
+static void apply_macro(Pp *c, Macro *macro, Level *lvl, int32 depth, StringBuilder *dst) {
+    if(UNLIKELY(depth + 1 >= MAX_EXPANSION_DEPTH)) depth_error(c, macro);
+
+    for(int32 i = 0; i < macro->nparams; ++i) {
+        ArgInfo* arg = &lvl->args[i];
+        if(arg->raw_len == 0 || !arg_has_macro(c, arg->raw, arg->raw_len)) continue;
+
+        StringBuilder* ex = &lvl->exp[i];
+        ex->len = 0;
+        scan(c, arg->raw, arg->raw + arg->raw_len, ex, depth + 1);
+        arg->raw = ex->src;
+        arg->raw_len = ex->len;
+    }
+
+    StringBuilder* out = &lvl->subst;
+    out->len = 0;
+
+    for(uint64 i = 0; i < macro->nparts; ++i) {
+        const MacroPart* part = &macro->parts[i];
+
+        if(part->kind == MacroPartKind:<TEXT) 
+            sb_write(out, part->text, part->len);
+        else {
+            const ArgInfo* arg = &lvl->args[part->param];
+            sb_write(out, arg->raw, arg->raw_len);
+        }
+    }
+
+    if(out->len == 0) call;
+
+    macro->disable = true;
+    scan(c, out->src, out->src + out->len, dst, depth + 1);
+    macro->disable = false;
+}
+
+static const char* handle_template(Pp *c, const char* peek, const char* key) {
+    const char* end = c->cur_end;
+
+    while(*peek == ' ' || *peek == '\t') peek++;
+
+    if(CLS(*peek) != ClsMode:<IDENT)
+        pp_error(c, ErrorCodeSystem:<INVALID_PREPROCESS, "Esperado o nome do modelo depois de '%s'", key);
+
+    const char* name = peek;
+    while(IS_IDC(*peek)) peek++;
+    uint64 name_len = (uint64)(peek - name);
+
+    if(name_is_reserved(name, name_len))
+        pp_error(c, ErrorCodeSystem:<INVALID_PREPROCESS, "'%.*s' e um nome reservado", (int32)name_len, name);
+
+    Macro macro = { 0 };
+    memset(&macro, 0, bytes(Macro));
+    macro.name = name;
+    macro.name_len = (uint32)name_len;
+    macro.kind = MacroKind:<OBJECT;
+
+    const char* pn[MAX_MACRO_PARAMS];
+    uint64 pl[MAX_MACRO_PARAMS];
+    int32 np = 0;
+
+    while(*peek == ' ' || *peek == '\t') peek++;
+
+    if(*peek == '(') {
+        macro.kind = MacroKind:<FUNCTION;
+        peek++;
+        while(*peek == ' ' || *peek == '\t') peek++;
+
+        if(*peek == ')')
+            peek++;
+        else {
+            for(;;) {
+                while(*peek == ' ' || *peek == '\t') peek++;
+
+                if(CLS(*peek) != ClsMode:<IDENT)
+                    pp_error(c, ErrorCodeSystem:<INVALID_PREPROCESS_PARAM,
+                        "Parametro invalido na lista de '%.*s'.", (int32)name_len, name);
+
+                const char* ps = peek;
+                while(IS_IDC(*peek)) peek++;
+                uint64 plen = (uint64)(peek - ps);
+
+                if(np >= MAX_MACRO_PARAMS)
+                    pp_error(c, ErrorCodeSystem:<INVALID_PREPROCESS_PARAM,
+                        "Excedido o numero de parametros permitidos em '%.*s'.", (int32)name_len, name);
+                if(param_index(ps, plen, pn, pl, np) >= 0)
+                    pp_error(c, ErrorCodeSystem:<INVALID_PREPROCESS_PARAM, "Parametro '%.*s' repetido em '%.*s'.",
+                        (int32)plen, ps, (int32)name_len, name);
+
+                pn[np] = ps;
+                pl[np] = plen;
+                np++;
+
+                while(*peek == ' ' || *peek == '\t') peek++;
+                if(*peek == ',') {
+                    peek++;
+                    continue;
+                }
+
+                if(*peek == ')') {
+                    peek++;
+                    break;
+                }
+
+                pp_error(c, ErrorCodeSystem:<INVALID_PREPROCESS, "Esperado ',' ou ')' na lista de parametros de '%.*s'.", (int32)name_len, name);
+            }
+        }
+    }
+
+    macro.nparams = np;
+
+    while(*peek == ' ' || *peek == '\t') peek++;
+    if(peek[0] != '-' || peek[1] != '>')
+        pp_error(c, ErrorCodeSystem:<INVALID_PREPROCESS, "Esperado '->' depois de '%.*s'.", (int32)name_len, name);
+
+    peek += 2;
+
+    const char* body = peek;
+    const char* term = find_block_end(body, end, body);
+
+    if(!term)
+        pp_error(c, ErrorCodeSystem:<INVALID_PREPROCESS,
+                    "'%.*s': bloco de '%s' sem '<-' de fechamento (o '<-' deve ficar no fim de uma linha ou em uma linha isolada).",
+                        (int32)name_len, name, key);
+
+    StringBuilder* builder = &c->blank;
+    builder->len = 0;
+    uint64 nl = 0;
+
+    for(const char* q = body; q < term;) {
+        char ch = *q;
+
+        if(ch == '\\') {
+            const char* r = q + 1;
+            if(r < term && *r == '\r') r++;
+            if(r < term && *r == '\n') {
+                nl++;
+                sb_writec(builder, ' ');
+                q = r + 1;
+                continue;
+            }
+        }
+
+        if(ch == '"' || ch == '\'') {
+            const char* lit_end = skip_literal(q, term);
+            sb_write(builder, q, (uint64)(lit_end - q));
+            q = lit_end;
+            continue;
+        }
+
+        if(ch == '/' && q + 1 < term && q[1] == '/') {
+            while(q < term && *q != '\n') q++;
+            continue;
+        }
+
+        if(is_comment_open(q, term)) {
+            q = skip_block_comment(q, term, &nl);
+            sb_writec(builder, ' ');
+            continue;
+        }
+
+        if(ch == '\n') nl++;
+        sb_writec(builder, ch);
+        q++;
+    }
+
+    uint64 lead = 0;
+    uint64 tail = builder->len;
+
+    while(lead < tail && (IS_WS(builder->src[lead]) || builder->src[lead] == '\n')) lead++;
+    while(tail > lead && (IS_WS(builder->src[tail - 1]) || builder->src[tail - 1] == '\n')) tail--;
+
+    if(tail == lead)
+        pp_error(c, ErrorCodeSystem:<INVALID_PREPROCESS, "'%.*s': bloco de '%s' vazio", (int32)name_len, name, key);
+
+    uint64 value_len = tail - lead;
+    char* value = (char*)arena_alloc(c->arena, value_len + 1);
+    memcpy(value, builder->src + lead, value_len);
+    value[value_len] = '\0';
+    macro.value = value;
+    macro.value_len = (uint32)value_len;
+    macro.has_ident = value_has_ident(value, value_len);
+
+    if(macro.kind == MacroKind:<FUNCTION) compile_template(c, &macro, pn, pl);
+    macro_define(c, &macro);
+
+    write_newlines(c, nl);
+    call term + 2;
+}
+
+static bool header_needs_obj(const char* src, uint64 len, bool *dll_out) {
+    const char* peek = src;
+    const char* end = src + len;
+    int32 depth = 0;
+    bool has_proto = false;
+    bool has_dll = false;
+    bool has_paren = false;
+    bool has_assign = false;
+    char last = 0;
+
+    while(peek < end) {
+        char ch = *peek;
+
+        if(ch == '"' || ch == '\'') {
+            peek = skip_literal(peek, end);
+            last = ch;
+            continue;
+        }
+
+        if(ch == '/' && peek + 1 < end && peek[1] == '/') {
+            while(peek < end && *peek != '\n') peek++;
+            continue;
+        }
+
+        if(is_comment_open(peek, end)) {
+            peek = skip_block_comment(peek, end, NULL);
+            continue;
+        }
+
+        if(CLS(ch) == ClsMode:<IDENT) {
+            const char* str = peek;
+            while(peek < end && IS_IDC(*peek)) peek++;
+
+            if(depth == 0 && peek - str == 7 && memcmp(str, "extract", 7) == 0) {
+                const char* q = peek;
+                while(q < end && (*q == ' ' || *q == '\t')) q++;
+                
+                if(q + 1 < end && q[0] == '-' && q[1] == '>') {
+                    q += 2;
+                    while(q < end && (*q == ' ' || *q == '\t')) q++;
+
+                    if(q < end && *q == '[') {
+                        const char* cl = (const char*)memchr(q, ']', (uint64)(end - q));
+                        const char* nl = (const char*)memchr(q, '\n', (uint64)(end - q));
+                        bool is_lh = (bool)(cl && cl - q >= 4 && memcmp(cl - 3, ".lh", 3) == 0);
+                        if(cl && (!nl || cl < nl) && !is_lh) has_dll = true;
+                    }
+                }
+
+                while(peek < end && *peek != '\n') peek++;
+                continue;
+            }
+
+            last = 'a';
+            continue;
+        }
+
+        if(ch == '{') {
+            if(depth++ == 0) {
+                has_paren = false;
+                has_assign = false;
+                last = 0;
+            }
+        } else if(ch == '}') {
+            if(depth > 0 && --depth == 0) {
+                has_paren = false;
+                has_assign = false;
+                last = 0;
+            }
+        } else if(depth == 0) {
+            if(ch == '(') has_paren = true;
+            else if(ch == '=') has_assign = true;
+            else if(ch == ';') {
+                if(has_paren && last == ')' && !has_assign) has_proto = true;
+                has_paren = false;
+                has_assign = false;
+                last = 0;
+                peek++;
+                continue;
+            }
+            if(!IS_WS(ch) && ch != '\n') last = ch;
+        }
+
+        peek++;
+    }
+
+    if(dll_out) *dll_out = has_dll;
+
+    call has_proto;
+}
+
+static char* target_extract_directive(Pp *c, const char** ptr, ExtractType* type, bool *is_dll) {
+    const char* peek = *ptr;
+
+    while(*peek == ' ' || *peek == '\t') peek++;
+
+    if(peek[0] != '-' || peek[1] != '>')
+        pp_error(c, ErrorCodeSystem:<INVALID_EXTRACT_TARGET, "Sintaxe invalida para o extract (%s)", EXTRACT_USAGE);
+    
+    peek += 2;
+
+    while(*peek == ' ' || *peek == '\t') peek++;
+
+    char close = '\0';
+
+    if(*peek == '"') {
+        *type = ExtractType:<USER_DIR;
+        close = '"';
+    } else if(*peek == '[') {
+        *type = ExtractType:<STDLIB;
+        close = ']';
+    } else 
+        pp_error(c, ErrorCodeSystem:<INVALID_EXTRACT_TARGET, "Sintaxe invalida para o extract (%s)", EXTRACT_USAGE);
+
+    peek++;
+
+    while(*peek == ' ' || *peek == '\t') peek++;
+    const char* start = peek;
+    while(*peek && *peek != close && *peek != '\n' && *peek != '\r') peek++;
+
+    if(*peek != close) 
+        pp_error(c, ErrorCodeSystem:<INVALID_EXTRACT_TARGET, "Delimitador '%c' do extract nao foi encontrado (%s).", close, EXTRACT_USAGE);
+
+    const char* stop = peek;
+    while(stop > start && (stop[-1] == ' ' || stop[-1] == '\t')) stop--;
+    uint64 len = (uint64)(stop - start);
+    peek++;
+
+    if(len == 0)
+        pp_error(c, ErrorCodeSystem:<INVALID_EXTRACT_TARGET, "O extract esta vazio. (%s)", EXTRACT_USAGE);
+
+    bool has_lh = (bool)(len > 3 && memcmp(stop -3, ".lh", 3) == 0);
+    char* target = arena_strndup(c->arena, start, len);
+    *is_dll = false;
+
+    if(*type == ExtractType:<USER_DIR) {
+        if(!has_lh)
+            pp_error(c, ErrorCodeSystem:<INVALID_EXTRACT_TARGET, "O extract precisa usar a extensao '.lh': '%s' (%s)",
+                        target, EXTRACT_USAGE);
+    } else if(!has_lh) {
+        for(uint64 i = 0; i < len; ++i) {
+            if(target[i] >= 'A' && target[i] <= 'Z') target[i] += 32;
+            if(!IS_IDC(target[i]) && target[i] != '-' && target[i] != '.')
+                pp_error(c, ErrorCodeSystem:<INVALID_EXTRACT_TARGET, "Nome da dll esta invalido: '%s'", target);
+        }
+
+        if(len > 4 && strcmp(target + len - 4, ".dll") == 0) target[len -= 4] = '\0';
+        
+        *is_dll = true;
+    }
+
+    *ptr = peek;
+    call target;
+}
+
+static const char* handle_extract(Pp *c, const char* peek) {
+    while(*peek == ' ' || *peek == '\t') peek++;
+
+    ExtractType type;
+    bool is_dll = false;
+    char* target = target_extract_directive(c, &peek, &type, &is_dll);
+
+    while(*peek && *peek != '\n') peek++;
+    uint64 after_line = c->src_line;
+
+    if(*peek == '\n') {
+        peek++;
+        after_line++;
+    }
+
+    if(is_dll) {
+        link_add(c, target, LinkKind:<DLL);
+        if(after_line > c->src_line) write_newlines(c, 1);
+        call peek;
+    }
+
+    char* resolved = "\0";
+    
+    if(type == ExtractType:<STDLIB) {
+        if(!c->lib_dir)
+            pp_error(c, ErrorCodeSystem:<INVALID_EXTRACT_TARGET, "Stdlib nao foi configurada, impossivel resolver [%s].", target);
+
+        resolved = resolve_path(c->lib_dir, target, c->arena);
+    } else
+        resolved = resolve_path(c->cur_dir, target, c->arena);
+
+    char* canon = canonical_path(resolved, c->arena);
+
+    if(!include_verify(c, canon)) {
+        uint32 flen = 0;
+        char* content = read_content(resolved, c->arena, &flen);
+        
+        if(!content) {
+            if(type == ExtractType:<STDLIB)
+                pp_error(c, ErrorCodeSystem:<READFILE_ERROR, "'%s' nao encontrado na stdlib ('%s')", target, c->lib_dir);
+            pp_error(c, ErrorCodeSystem:<READFILE_ERROR, "'%s' nao enctrado em '%s'", target, c->cur_dir);
+        }
+
+        if(target_is_single(content, flen)) include_add(c, canon);
+
+        if(type == ExtractType:<STDLIB) {
+            char* obj = obj_path_for(c, resolved);
+            link f = open(obj, OpenFileMode:<READ_BINARY_FILE);
+
+            if(f) {
+                close(f);
+                link_add(c, canonical_path(obj, c->arena), LinkKind:<OBJECT);
+            } else {
+                bool header_has_dll = false;
+                if(header_needs_obj(content, flen, &header_has_dll)) {
+                    if(header_has_dll) 
+                        fwrite(stderr,
+                                "Preprocessador: %s:%zu: Aviso: '%s' declara funcoes sem corpo e o objeto '%s' nao foi encontrado; se algumas nao forem da dll, havera 'undefined reference' no link.\n",
+                                c->cur_file, c->src_line, target, obj);
+                    else 
+                        pp_error(c, ErrorCodeSystem:<READFILE_ERROR,
+                                 "'%s' declara funcoes sem corpo, mas o objeto '%s' nao foi encontrado (compile a stdlib antes).", target, obj);
+                }
+            }
+        }
+
+        process_file(c, resolved, content, flen);
+
+        if(c->sb->len > 0 && c->sb->src[c->sb->len - 1] != '\n') {
+            sb_writec(c->sb, '\n');
+            c->out_line++;
+        }
+    }
+
+    c->src_line = (uint32)after_line;
+    linemap_push(c->map, c->arena, c->out_line + 1, c->src_line, c->cur_file);
+    call peek;
+}
+
+static void emit_builtin(Pp *c, Macro *macro, StringBuilder *dst) {
+    char num[32];
+
+    if(macro->kind == MacroKind:<BUILTIN_LINE) {
+        int32 n = snwrite(num, bytes(num), "%zu", c->src_line);
+        sb_write(dst, num, (uint64)n);
+        call;
+    }
+
+    if(macro->kind == MacroKind:<BUILTIN_COUNTER) {
+        int32 n = snwrite(num, bytes(num), "%u", c->counter++);
+        sb_write(dst, num, (uint64)n);
+        call;
+    }
+
+    if(macro->kind == MacroKind:<BUILTIN_FILE) {
+        sb_writec(dst, '"');
+
+        for(const char* file = c->cur_file; *file; ++file) {
+            if(*file == '\\' || *file == '"') sb_writec(dst, '\\');
+            sb_writec(dst, *file);
+        }
+        sb_writec(dst, '"');
+        call;
+    }
+}
+
+static void scan(Pp *c, const char* peek, const char* end, StringBuilder *dst, int32 depth) {
+    const bool top = (bool)(depth == 0);
+    bool bol = top;
+    const char* flush = peek;
+
+    while(peek < end) {
+        const char* run = peek;
+        while(peek < end && CLS(*peek) == ClsMode:<OTHER) peek++;
+
+        if(peek > run) {
+            bol = false;
+            if(peek >= end) break;
+        }
+
+        if(CLS(*peek) == ClsMode:<WS) {
+            while(peek < end && CLS(*peek) == ClsMode:<WS) peek++;
+            continue;
+        }
+
+        if(CLS(*peek) == ClsMode:<NL) {
+            peek++;
+            if(top) {
+                c->src_line++;
+                c->out_line++;
+                bol = true;
+            }
+
+            continue;
+        }
+
+        if(CLS(*peek) == ClsMode:<QUOTE || CLS(*peek) == ClsMode:<APOS) {
+            peek = skip_literal(peek, end);
+            bol = false;
+            continue;
+        }
+
+        if(CLS(*peek) == ClsMode:<SLASH) {
+            if(peek + 1 < end && peek[1] == '/')
+                while(peek < end && *peek != '\n') peek++;
+            else if(is_comment_open(peek, end)) {
+                const char* start = peek;
+                uint64 nl = 0;
+                peek = skip_block_comment(peek, end, &nl);
+
+                if(top && ((uint64)(peek - start) < COMMENT_OPEN_LEN + COMMENT_CLOSE_LEN ||
+                    memcmp(peek - COMMENT_CLOSE_LEN, COMMENT_CLOSE, COMMENT_CLOSE_LEN) != 0))
+                    pp_error(c, ErrorCodeSystem:<INVALID_COMMENT, "Comentario '/comment' nao foi fechado com 'endcomment/'.");
+
+                FLUSH_TO(start);
+                sb_writec(dst, ' ');
+                for(uint64 k = 0; k < nl; ++k) sb_writec(dst, '\n');
+                if(top) {
+                    c->src_line += nl;
+                    c->out_line += nl;
+                }
+                flush = peek;
+            } else {
+                peek++;
+                bol = false;
+            }
+            continue;
+        }
+
+        if(CLS(*peek) == ClsMode:<DIGIT) {
+            while(peek < end) {
+                char ch = *peek;
+                if(ch == '.' && peek + 1 < end && peek[1] == '.') break;
+                if(IS_IDC(ch) || ch == '.') {
+                    if((ch == 'e' || ch == 'E' || ch == 'p' || ch == 'P') &&
+                        peek + 1 < end && (peek[1] == '+' || peek[1] == '-')) peek++;
+                    peek++;
+                } else break;
+            }
+
+            bol = false;
+            continue;
+        }
+
+        const char* str = peek++;
+        while(peek < end && IS_IDC(*peek)) peek++;
+        uint64 n = (uint64)(peek - str);
+
+        if(top && bol) {
+            if(n == 10 && memcmp(str, "preprocess", 10) == 0) {
+                FLUSH_TO(str);
+                peek = handle_preprocess(c, peek);
+                flush = peek;
+                bol = true;
+                continue;
+            }
+
+            if(n == 14 && memcmp(str, "funcpreprocess", 14) == 0) {
+                FLUSH_TO(str);
+                peek = handle_template(c, peek, "funcpreprocess");
+                flush = peek;
+                bol = false;
+                continue;
+            }
+
+            if(n == 16 && memcmp(str, "structpreprocess", 16) == 0) {
+                FLUSH_TO(str);
+                peek = handle_template(c, peek, "structpreprocess");
+                flush = peek;
+                bol = false;
+                continue;
+            }
+
+            if(n == 7 && memcmp(str, "extract", 7) == 0) {
+                FLUSH_TO(str);
+                peek = handle_extract(c, peek);
+                flush = peek;
+                bol = true;
+                continue;
+            }
+
+            if(n == 3 && memcmp(str, "use", 3) == 0) {
+                const char* q = peek;
+                while(*q == ' ' || *q == '\t') q++;
+                const char* after = q;
+                use_policy_directive(q, &after);
+                if(after != q) {
+                    FLUSH_TO(str);
+                    write_newlines(c, 1);
+                    peek = after;           /* consome a diretiva inteira (antes vazava para a saida) */
+                    flush = peek;
+                    bol = true;
+                    continue;
+                }
+            }
+        }
+
+        bol = false;
+        Macro* macro = macro_lookup(c, str, n);
+        if(!macro || macro->disable) continue;
+
+        const char* resume = peek;
+        uint64 nl = 0;
+        Level* lvl = NULL;
+
+        if(macro->kind == MacroKind:<FUNCTION) {
+            const char* r = peek;
+            uint64 pre = 0;
+
+            while(r < end && (CLS(*r) == ClsMode:<WS || CLS(*r) == ClsMode:<NL)) {
+                if(CLS(*r) == ClsMode:<NL) pre++;
+                r++;
+            }
+
+            if(r >= end || *r != '(') continue;
+
+            lvl = get_level(c, depth);
+            uint64 inner_nl = 0;
+            resume = parse_call(c, macro, lvl, r, end, &inner_nl);
+            nl = pre + inner_nl;
+        }
+
+        FLUSH_TO(str);
+        uint64 before = dst->len;
+
+        if(macro->kind >= MacroKind:<BUILTIN_LINE)
+            emit_builtin(c, macro, dst);
+        else if(macro->kind == MacroKind:<OBJECT) {
+            if(macro->value_len == 0) { }
+            else if(!macro->has_ident)
+                sb_write(dst, macro->value, macro->value_len);
+            else {
+                if(UNLIKELY(depth + 1 >= MAX_EXPANSION_DEPTH)) depth_error(c, macro);
+                macro->disable = true;
+                scan(c, macro->value, macro->value + macro->value_len, dst, depth + 1);
+                macro->disable = false;
+            }
+        } else apply_macro(c, macro, lvl, depth, dst);
+
+        if(top) {
+            uint64 emmited = 0;
+            for(uint64 k = before; k < dst->len; ++k) if(dst->src[k] == '\n') emmited++;
+            for(uint64 k = 0; k < nl; ++k) sb_writec(dst, '\n');
+            c->out_line += emmited + nl;
+            c->src_line += nl;
+            if(emmited) linemap_push(c->map, c->arena, c->out_line + 1, c->src_line, c->cur_file);
+        }
+
+        peek = resume;
+        flush = peek;
+    }
+
+    FLUSH_TO(end);
+}
+
+static void process_file(Pp *c, const char* filepath, const char* src, uint64 len) {
+    if(c->include_depth >= MAX_INCLUDE_DEPTH)
+        pp_error(c, ErrorCodeSystem:<INCLUDE_DEPTH_ERROR, "Extract ultrapassa o ciclo limite (limite %d): possivel ciclo com 'use target -> multiple'.",
+                    MAX_INCLUDE_DEPTH);
+
+    const char* saved_file = c->cur_file;
+    const char* saved_dir = c->cur_dir;
+    const char* saved_end = c->cur_end;
+    uint64 saved_line = c->src_line;
+
+    c->include_depth++;
+    c->cur_file = filepath;
+    c->cur_dir = get_dir(filepath, c->arena);
+    c->cur_end = src + len;
+    c->src_line = 1;
+
+    linemap_push(c->map, c->arena, c->out_line + 1, 1, filepath);
+    scan(c, src, src + len, c->sb, 0);
+
+    c->include_depth--;
+    c->cur_file = saved_file;
+    c->cur_dir = saved_dir;
+    c->cur_end = saved_end;
+    c->src_line = (uint32)saved_line;
+}
+
+void preprocess_run(Preprocess *pp, const char* filepath, const char* lib_dir, Arena *arena, LineMap *map) {
+    tables_init();
+    if(map) linemap_init(map);
+
+    Pp* c = (Pp*)calloc(1, bytes(Pp));
+    if(!c) {
+        fwrite(stderr, "Preprocessador: Falha ao alocar o context.\n");
+        exit(ErrorCodeSystem:<ALLOCATE_ERROR);
+    }
+
+    c->arena = arena;
+    c->lib_dir = lib_dir;
+    c->map = map;
+
+    builtin_define(c, "__LINE__", MacroKind:<BUILTIN_LINE);
+    builtin_define(c, "__FILE__", MacroKind:<BUILTIN_FILE);
+    builtin_define(c, "__COUNTER__", MacroKind:<BUILTIN_COUNTER);
+
+    uint32 len = 0;
+    char* src = read_content(filepath, arena, &len);
+    if(!src) {
+        fwrite(stderr, "Preprocessador: Nao foi possivel abrir o arquivo: %s.\n", filepath);
+        exit(ErrorCodeSystem:<READFILE_ERROR);
+    }
+
+    StringBuilder sb = { 0 };
+    memset(&sb, 0, bytes(StringBuilder));
+
+    uint64 cap = len + len / 4 + STRING_BUILDER_INIT_CAPACITY;
+    if(cap > (uint64)MAX_CAP) cap = (uint64)MAX_CAP;
+    sb_init(&sb, NULL, (uint32)cap);
+    c->sb = &sb;
+
+    if(target_is_single(src, len)) include_add(c, canonical_path(filepath, arena));
+
+    pp->original_src = src;
+    process_file(c, arena_strdup(arena, filepath), src, len);
+
+    pp->links = c->links;
+    pp->link_count = c->link_count;
+
+    pp->process_str = arena_strndup(arena, sb.src, sb.len);
+    pp->process_len = sb.len;
+    free(sb.src);
+
+    for(int32 i = 0; i < MAX_EXPANSION_DEPTH + 2; ++i) {
+        Level* lvl = c->levels[i];
+        if(!lvl) continue;
+        free(lvl->norm.src);
+        free(lvl->subst.src);
+        for(int32 k = 0; k < MAX_MACRO_PARAMS; ++k) free(lvl->exp[k].src);
+        free(lvl);
+    }
+
+    free(c->temp.src);
+    free(c->blank.src);
+    free(c->table);
+    free(c);
+}

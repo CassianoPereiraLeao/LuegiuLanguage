@@ -1,0 +1,19 @@
+extract -> "../include/platform.lh"
+
+preprocess EXE_BUF -> 4096
+
+bool stdlib_dir(char* out, uint64 cap) {
+    char exe[EXE_BUF];
+
+    DWORD n = GetModuleFileNameA(NULL, exe, (DWORD)bytes(exe));
+    if(n == 0 || n >= (DWORD)bytes(exe)) call false;
+
+    char* sep = NULL;
+    for(char* q = exe; *q; ++q)
+        if(*q == '/' || *q == '\\') sep = q;
+    if(!sep) call false;
+    *sep = '\0';
+
+    int32 w = snwrite(out, cap, "%s/stdlib", exe);
+    call (bool)(w > 0 && (uint64)w < cap);
+}

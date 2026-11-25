@@ -1,0 +1,28 @@
+use target -> single
+
+extract -> [io.lh]
+
+newtype enum {
+    NORMAL,
+    WRONG_PATH,
+    ALLOCATE_ERROR,
+    READFILE_ERROR,
+    OUT_OF_PATH,
+    OUT_OF_SOURCES,
+    BUFFER_OVERFLOW,
+    INVALID_USE_TARGET,
+    INVALID_EXTRACT_TARGET,
+    COMPILE_ERROR,
+    EXPLODE_MAX_ERRORS,
+    INVALID_PREPROCESS,
+    MACRO_ERROR,
+    INCLUDE_DEPTH_ERROR,
+    MAX_PATHS_EXPLODE,
+    LEVEL_ERROR,
+    RESERVED_NAME,
+    INVALID_PREPROCESS_PARAM,
+    INVALID_COMMENT
+} ErrorCodeSystem;
+
+extern void exit(ErrorCodeSystem code);
+extern link end(ErrorCodeSystem code);

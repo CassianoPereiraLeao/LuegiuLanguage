@@ -1,0 +1,910 @@
+extract -> "memory.lh"
+
+static uint8* g_free[65];
+static uint8* g_cur;
+static uint8* g_end;
+
+static uint8* small_refill(uint64 cls) {
+    uint64 usable = cls << 4;
+    if(cls == 0) {
+        usable = 16;
+    }
+    uint64 total = usable + 16;
+
+    if((uint64)(g_end - g_cur) < total) {
+        g_cur = (uint8*)VirtualAlloc((link)0, CHUNK, (DWORD)0x3000, 4);
+        if(g_cur == (uint8*)0) {
+            g_end = (uint8*)0;
+            call (uint8*)0;
+        }
+        g_end = g_cur + CHUNK;
+    }
+
+    uint8* b = g_cur;
+    g_cur = g_cur + total;
+    *(uint64*)b = cls;
+    *(uint64*)(b + 8) = usable;
+    call b + 16;
+}
+
+static uint8* sys_alloc(uint64 size) {
+    if(size > (uint64)0x7FFFFFFFFFFFFF00) {
+        call (uint8*)0;
+    }
+    uint64 usable = (size + 15) & (~(uint64)15);
+    uint8* b = (uint8*)HeapAlloc(GetProcessHeap(), 0, (WINSIZE)usable + 16);
+    if(b == (uint8*)0) {
+        call (uint8*)0;
+    }
+    *(uint64*)b = TAG_SYS;
+    *(uint64*)(b + 8) = usable;
+    call b + 16;
+}
+
+link malloc(uint64 size) {
+    if(size <= MAX_SMALL) {
+        uint64 cls = (size + 15) >> 4;
+        uint8* b = g_free[cls];
+        if(b != (uint8*)0) {
+            g_free[cls] = *(uint8**)b;
+            call (link)b;
+        }
+        call (link)small_refill(cls);
+    }
+    call (link)sys_alloc(size);
+}
+
+void free(link p) {
+    if(p == NULL) {
+        call;
+    }
+    uint8* b = (uint8*)p;
+    uint64 tag = *(uint64*)(b - 16);
+    if(tag < TAG_SYS) {
+        *(uint8**)b = g_free[tag];
+        g_free[tag] = b;
+        call;
+    }
+    HeapFree(GetProcessHeap(), 0, (link)(b - 16));
+}
+
+link calloc(uint64 n, uint64 size) {
+    if(((n | size) >> 32) != 0) {
+        if(n != 0 && size > (~(uint64)0) / n) {
+            call NULL;
+        }
+    }
+    uint64 total = n * size;
+    uint8* p = (uint8*)malloc(total);
+    if(p == (uint8*)0) {
+        call NULL;
+    }
+    uint64* q = (uint64*)p;
+    uint64 words = (total + 7) >> 3;
+    for(uint64 i = 0; i < words; ++i) {
+        q[i] = 0;
+    }
+    call (link)p;
+}
+
+link realloc(link p, uint64 size) {
+    if(p == NULL) {
+        call malloc(size);
+    }
+    uint8* b = (uint8*)p;
+    uint64 old = *(uint64*)(b - 8);
+    if(size <= old) {
+        call p;
+    }
+    uint8* n = (uint8*)malloc(size);
+    if(n == (uint8*)0) {
+        call NULL;
+    }
+    uint64* s = (uint64*)b;
+    uint64* d = (uint64*)n;
+    uint64 words = old >> 3;
+    for(uint64 i = 0; i < words; ++i) {
+        d[i] = s[i];
+    }
+    free(p);
+    call (link)n;
+}
+
+int32 diff_at(uint8* p, uint8* q, uint64 i) {
+    call (int32)p[i] - (int32)q[i];
+}
+
+static int32 resolve64(uint8* p, uint8* q) {
+    for(uint64 k = 0; k < 64; k = k + 16) {
+        uint32 m = __vdiff16(p + k, q + k);
+        if(m != 0) {
+            call diff_at(p, q, k + __ctz(m));
+        }
+    }
+    call 0;
+}
+
+int32 memcmp(link a, link b, uint64 n) {
+    uint8* p = (uint8*)a;
+    uint8* q = (uint8*)b;
+
+    if(n >= 64) {
+        uint8* pl = p + (n - 64);
+        uint8* ql = q + (n - 64);
+        while(p < pl) {
+            if(__veq64(p, q) == 0) {
+                call resolve64(p, q);
+            }
+            p = p + 64;
+            q = q + 64;
+        }
+
+        if(__veq64(pl, ql) == 0) {
+            call resolve64(pl, ql);
+        }
+        call 0;
+    }
+
+    if(n >= 16) {
+        uint8* pl = p + (n - 16);
+        uint8* ql = q + (n - 16);
+        while(p < pl) {
+            uint32 m = __vdiff16(p, q);
+            if(m != 0) {
+                call diff_at(p, q, __ctz(m));
+            }
+            p = p + 16;
+            q = q + 16;
+        }
+        uint32 t = __vdiff16(pl, ql);
+        if(t != 0) {
+            call diff_at(pl, ql, __ctz(t));
+        }
+        call 0;
+    }
+
+    if(n >= 8) {
+        uint64 x = *(uint64*)p ^ *(uint64*)q;
+        if(x != 0) {
+            call diff_at(p, q, __ctz(x) >> 3);
+        }
+        uint64 off = n - 8;
+        uint64 y = *(uint64*)(p + off) ^ *(uint64*)(q + off);
+        if(y != 0) {
+            call diff_at(p, q, off + (__ctz(y) >> 3));
+        }
+        call 0;
+    }
+
+    if(n >= 4) {
+        uint64 x = (uint64)(*(uint32*)p ^ *(uint32*)q);
+        if(x != 0) {
+            call diff_at(p, q, __ctz(x) >> 3);
+        }
+        uint64 off = n - 4;
+        uint64 y = (uint64)(*(uint32*)(p + off) ^ *(uint32*)(q + off));
+        if(y != 0) {
+            call diff_at(p, q, off + (__ctz(y) >> 3));
+        }
+        call 0;
+    }
+
+    if(n == 0) {
+        call 0;
+    }
+
+    if(*p != *q) {
+        call diff_at(p, q, 0);
+    }
+    uint64 mid = n >> 1;
+    if(p[mid] != q[mid]) {
+        call diff_at(p, q, mid);
+    }
+    call diff_at(p, q, n - 1);
+}
+
+link memcpy(link dst, link src, uint64 n) {
+    uint8* d = (uint8*)dst;
+    uint8* s = (uint8*)src;
+
+    if(n <= 16) {
+        if(n >= 8) {
+            uint64 a = *(uint64*)s;
+            uint64 b = *(uint64*)(s + (n - 8));
+            *(uint64*)d = a;
+            *(uint64*)(d + (n - 8)) = b;
+            call dst;
+        }
+        if(n >= 4) {
+            uint32 a = *(uint32*)s;
+            uint32 b = *(uint32*)(s + (n - 4));
+            *(uint32*)d = a;
+            *(uint32*)(d + (n - 4)) = b;
+            call dst;
+        }
+        if(n >= 2) {
+            uint16 a = *(uint16*)s;
+            uint16 b = *(uint16*)(s + (n - 2));
+            *(uint16*)d = a;
+            *(uint16*)(d + (n - 2)) = b;
+            call dst;
+        }
+        if(n == 1) {
+            *d = *s;
+        }
+        call dst;
+    }
+
+    if(n <= 32) {
+        __vcopy16x2(d, s, n);
+        call dst;
+    }
+    if(n <= 64) {
+        __vcopy32x2(d, s, n);
+        call dst;
+    }
+    if(n >= 2048) {
+        __repmovsb(d, s, n);
+        call dst;
+    }
+
+    uint8* dl = d + (n - 64);
+    uint8* sl = s + (n - 64);
+    while(d < dl) {
+        __vcopy64(d, s);
+        d = d + 64;
+        s = s + 64;
+    }
+    __vcopy64(dl, sl);
+    call dst;
+}
+
+link memmove(link dst, link src, uint64 n) {
+    uint8* d = (uint8*)dst;
+    uint8* s = (uint8*)src;
+
+    if(n <= 64) {
+        call memcpy(dst, src, n);
+    }
+    if(d == s) {
+        call dst;
+    }
+
+    if(d < s) {
+        if((uint64)(s - d) >= n) {
+            call memcpy(dst, src, n);
+        }
+        while(n >= 64) {
+            __vcopy64(d, s);
+            d = d + 64;
+            s = s + 64;
+            n = n - 64;
+        }
+        if(n != 0) {
+            memcpy(d, s, n);
+        }
+        call dst;
+    }
+
+    if((uint64)(d - s) >= n) {
+        call memcpy(dst, src, n);
+    }
+
+    while(n >= 64) {
+        n = n - 64;
+        __vcopy64(d + n, s + n);
+    }
+    if(n != 0) {
+        memcpy(d, s, n);
+    }
+    call dst;
+}
+
+link memset(link dst, int32 c, uint64 n) {
+    uint8* d = (uint8*)dst;
+    uint64 v = (uint64)(uint8)c * (uint64)0x0101010101010101;
+
+    if(n <= 16) {
+        if(n >= 8) {
+            *(uint64*)d = v;
+            *(uint64*)(d + (n - 8)) = v;
+            call dst;
+        }
+        if(n >= 4) {
+            uint32 w = (uint32)v;
+            *(uint32*)d = w;
+            *(uint32*)(d + (n - 4)) = w;
+            call dst;
+        }
+        if(n >= 2) {
+            uint16 w = (uint16)v;
+            *(uint16*)d = w;
+            *(uint16*)(d + (n - 2)) = w;
+            call dst;
+        }
+        if(n == 1) {
+            *d = (uint8)v;
+        }
+        call dst;
+    }
+
+    if(n <= 32) {
+        __vfill16x2(d, v, n);
+        call dst;
+    }
+    if(n <= 64) {
+        __vfill32x2(d, v, n);
+        call dst;
+    }
+    if(n >= 2048) {
+        __repstosb(d, v, n);
+        call dst;
+    }
+
+    uint8* dl = d + (n - 64);
+    while(d < dl) {
+        __vfill64(d, v);
+        d = d + 64;
+    }
+    __vfill64(dl, v);
+    call dst;
+}
+
+static uint64 zbytes64(uint64 x) {
+    uint64 m = (uint64)0x7F7F7F7F7F7F7F7F;
+    call ~(((x & m) + m) | x | m);
+}
+
+static uint32 zbytes32(uint32 x) {
+    uint32 m = (uint32)0x7F7F7F7F;
+    call ~(((x & m) + m) | x | m);
+}
+
+link memchr(link s, int32 c, uint64 n) {
+    uint8* p = (uint8*)s;
+    uint8 ch = (uint8)c;
+    uint64 rep = (uint64)ch * (uint64)0x0101010101010101;
+
+    if(n >= 64) {
+        uint8* pl = p + (n - 64);
+        while(p < pl) {
+            uint64 m = __vfind64(p, rep);
+            if(m != 0) {
+                call (link)(p + __ctz(m));
+            }
+            p = p + 64;
+        }
+        uint64 t = __vfind64(pl, rep);
+        if(t != 0) {
+            call (link)(pl + __ctz(t));
+        }
+        call NULL;
+    }
+
+    if(n >= 16) {
+        uint8* pl = p + (n - 16);
+        while(p < pl) {
+            uint32 m = __vfind16(p, rep);
+            if(m != 0) {
+                call (link)(p + __ctz(m));
+            }
+            p = p + 16;
+        }
+        uint32 t = __vfind16(pl, rep);
+        if(t != 0) {
+            call (link)(pl + __ctz(t));
+        }
+        call NULL;
+    }
+
+    if(n >= 8) {
+        uint64 x = zbytes64(*(uint64*)p ^ rep);
+        if(x != 0) {
+            call (link)(p + (__ctz(x) >> 3));
+        }
+        uint64 off = n - 8;
+        x = zbytes64(*(uint64*)(p + off) ^ rep);
+        if(x != 0) {
+            call (link)(p + off + (__ctz(x) >> 3));
+        }
+        call NULL;
+    }
+
+    if(n >= 4) {
+        uint32 rep32 = (uint32)rep;
+        uint32 x = zbytes32(*(uint32*)p ^ rep32);
+        if(x != 0) {
+            call (link)(p + (__ctz(x) >> 3));
+        }
+        uint64 off = n - 4;
+        x = zbytes32(*(uint32*)(p + off) ^ rep32);
+        if(x != 0) {
+            call (link)(p + off + (__ctz(x) >> 3));
+        }
+        call NULL;
+    }
+
+    if(n == 0) {
+        call NULL;
+    }
+    if(p[0] == ch) {
+        call (link)p;
+    }
+    if(n == 1) {
+        call NULL;
+    }
+    if(p[1] == ch) {
+        call (link)(p + 1);
+    }
+    if(n == 2) {
+        call NULL;
+    }
+    if(p[2] == ch) {
+        call (link)(p + 2);
+    }
+    call NULL;
+}
+
+link memrchr(link s, int32 c, uint64 n) {
+    uint8* p = (uint8*)s;
+    uint8 ch = (uint8)c;
+    uint64 rep = (uint64)ch * (uint64)0x0101010101010101;
+
+    if(n >= 64) {
+        uint64 i = n - 64;
+        while(i >= 64) {
+            uint64 m = __vfind64(p + i, rep);
+            if(m != 0) {
+                call (link)(p + i + (63 - __clz(m)));
+            }
+            i = i - 64;
+        }
+        uint64 m1 = __vfind64(p + i, rep);
+        if(m1 != 0) {
+            call (link)(p + i + (63 - __clz(m1)));
+        }
+        uint64 m0 = __vfind64(p, rep);
+        if(m0 != 0) {
+            call (link)(p + (63 - __clz(m0)));
+        }
+        call NULL;
+    }
+
+    if(n >= 16) {
+        uint64 i = n - 16;
+        while(i >= 16) {
+            uint32 m = __vfind16(p + i, rep);
+            if(m != 0) {
+                call (link)(p + i + (31 - __clz(m)));
+            }
+            i = i - 16;
+        }
+        uint32 m1 = __vfind16(p + i, rep);
+        if(m1 != 0) {
+            call (link)(p + i + (31 - __clz(m1)));
+        }
+        uint32 m0 = __vfind16(p, rep);
+        if(m0 != 0) {
+            call (link)(p + (31 - __clz(m0)));
+        }
+        call NULL;
+    }
+
+    if(n >= 8) {
+        uint64 off = n - 8;
+        uint64 x = zbytes64(*(uint64*)(p + off) ^ rep);
+        if(x != 0) {
+            call (link)(p + off + ((63 - __clz(x)) >> 3));
+        }
+        x = zbytes64(*(uint64*)p ^ rep);
+        if(x != 0) {
+            call (link)(p + ((63 - __clz(x)) >> 3));
+        }
+        call NULL;
+    }
+
+    if(n >= 4) {
+        uint32 rep32 = (uint32)rep;
+        uint64 off = n - 4;
+        uint32 x = zbytes32(*(uint32*)(p + off) ^ rep32);
+        if(x != 0) {
+            call (link)(p + off + ((31 - __clz(x)) >> 3));
+        }
+        x = zbytes32(*(uint32*)p ^ rep32);
+        if(x != 0) {
+            call (link)(p + ((31 - __clz(x)) >> 3));
+        }
+        call NULL;
+    }
+
+    if(n == 0) {
+        call NULL;
+    }
+    if(p[n - 1] == ch) {
+        call (link)(p + (n - 1));
+    }
+    if(n == 1) {
+        call NULL;
+    }
+    if(p[n - 2] == ch) {
+        call (link)(p + (n - 2));
+    }
+    if(n == 2) {
+        call NULL;
+    }
+    if(p[0] == ch) {
+        call (link)p;
+    }
+    call NULL;
+}
+
+link memccpy(link dst, link src, int32 c, uint64 n) {
+    uint8* hit = (uint8*)memchr(src, c, n);
+    if(hit == (uint8*)0) {
+        memcpy(dst, src, n);
+        call NULL;
+    }
+    uint64 len = (uint64)(hit - (uint8*)src) + 1;
+    memcpy(dst, src, len);
+    call (link)((uint8*)dst + len);
+}
+
+link mempcpy(link dst, link src, uint64 n) {
+    memcpy(dst, src, n);
+    call (link)((uint8*)dst + n);
+}
+
+link memmem(link hay, uint64 hl, link nee, uint64 nl) {
+    uint8* h = (uint8*)hay;
+    uint8* nd = (uint8*)nee;
+
+    if(nl == 0) {
+        call hay;
+    }
+    if(hl < nl) {
+        call NULL;
+    }
+    if(nl == 1) {
+        call memchr(hay, (int32)nd[0], hl);
+    }
+
+    uint8 f = nd[0];
+    uint8 l = nd[nl - 1];
+    uint64 fv = (uint64)f * (uint64)0x0101010101010101;
+    uint64 lv = (uint64)l * (uint64)0x0101010101010101;
+    uint64 cnt = hl - nl + 1;
+    uint64 mid = nl - 2;
+
+    if(cnt >= 16) {
+        uint64 lastblk = cnt - 16;
+        uint64 i = 0;
+        uint64 more = 1;
+        while(more != 0) {
+            uint32 m = __vfind16(h + i, fv) & __vfind16(h + i + (nl - 1), lv);
+            while(m != 0) {
+                uint64 k = i + __ctz(m);
+                if(memcmp((link)(h + k + 1), (link)(nd + 1), mid) == 0) {
+                    call (link)(h + k);
+                }
+                m = m & (m - 1);
+            }
+            if(i == lastblk) {
+                more = 0;
+            } else {
+                i = i + 16;
+                if(i > lastblk) {
+                    i = lastblk;
+                }
+            }
+        }
+        call NULL;
+    }
+
+    for(uint64 i = 0; i < cnt; ++i) {
+        if(h[i] == f && h[i + (nl - 1)] == l) {
+            if(memcmp((link)(h + i + 1), (link)(nd + 1), mid) == 0) {
+                call (link)(h + i);
+            }
+        }
+    }
+    call NULL;
+}
+
+int32 bcmp(link a, link b, uint64 n) {
+    uint8* p = (uint8*)a;
+    uint8* q = (uint8*)b;
+
+    if(n >= 64) {
+        uint8* pl = p + (n - 64);
+        uint8* ql = q + (n - 64);
+        while(p < pl) {
+            if(__veq64(p, q) == 0) {
+                call 1;
+            }
+            p = p + 64;
+            q = q + 64;
+        }
+        if(__veq64(pl, ql) == 0) {
+            call 1;
+        }
+        call 0;
+    }
+
+    if(n >= 16) {
+        uint8* pl = p + (n - 16);
+        uint8* ql = q + (n - 16);
+        while(p < pl) {
+            if(__vdiff16(p, q) != 0) {
+                call 1;
+            }
+            p = p + 16;
+            q = q + 16;
+        }
+        if(__vdiff16(pl, ql) != 0) {
+            call 1;
+        }
+        call 0;
+    }
+
+    if(n >= 8) {
+        uint64 off = n - 8;
+        uint64 x = (*(uint64*)p ^ *(uint64*)q) | (*(uint64*)(p + off) ^ *(uint64*)(q + off));
+        if(x != 0) {
+            call 1;
+        }
+        call 0;
+    }
+
+    if(n >= 4) {
+        uint64 off = n - 4;
+        uint32 x = (*(uint32*)p ^ *(uint32*)q) | (*(uint32*)(p + off) ^ *(uint32*)(q + off));
+        if(x != 0) {
+            call 1;
+        }
+        call 0;
+    }
+
+    if(n == 0) {
+        call 0;
+    }
+
+    uint32 x = (uint32)(p[0] ^ q[0]) | (uint32)(p[n >> 1] ^ q[n >> 1]) | (uint32)(p[n - 1] ^ q[n - 1]);
+    if(x != 0) {
+        call 1;
+    }
+    call 0;
+}
+
+void bzero(link p, uint64 n) {
+    memset(p, 0, n);
+}
+
+void bcopy(link src, link dst, uint64 n) {
+    memmove(dst, src, n);
+}
+
+void memset_explicit(link dst, int32 c, uint64 n) {
+    memset(dst, c, n);
+    __mem_barrier(dst);
+}
+
+void explicit_bzero(link dst, uint64 n) {
+    memset(dst, 0, n);
+    __mem_barrier(dst);
+}
+
+int32 memcpy_s(link dst, uint64 dstsz, link src, uint64 n) {
+    if(n == 0) {
+        call 0;
+    }
+    if(dst == NULL) {
+        call 22;
+    }
+    if(src == NULL) {
+        memset(dst, 0, dstsz);
+        call 22;
+    }
+    if(dstsz < n) {
+        memset(dst, 0, dstsz);
+        call 34;
+    }
+    uint64 a = (uint64)dst;
+    uint64 b = (uint64)src;
+    if((a - b) < n || (b - a) < n) {
+        memset(dst, 0, dstsz);
+        call 22;
+    }
+    memcpy(dst, src, n);
+    call 0;
+}
+
+int32 memmove_s(link dst, uint64 dstsz, link src, uint64 n) {
+    if(n == 0) {
+        call 0;
+    }
+    if(dst == NULL) {
+        call 22;
+    }
+    if(src == NULL) {
+        memset(dst, 0, dstsz);
+        call 22;
+    }
+    if(dstsz < n) {
+        memset(dst, 0, dstsz);
+        call 34;
+    }
+    memmove(dst, src, n);
+    call 0;
+}
+
+int32 memset_s(link dst, uint64 dstsz, int32 c, uint64 n) {
+    if(dst == NULL) {
+        call 22;
+    }
+    if(n > dstsz) {
+        memset_explicit(dst, c, dstsz);
+        call 34;
+    }
+    memset_explicit(dst, c, n);
+    call 0;
+}
+
+static uint32 lower8(uint32 c) {
+    if(c - 65 < 26) {
+        call c + 32;
+    }
+    call c;
+}
+
+int32 _memicmp(link a, link b, uint64 n) {
+    uint8* p = (uint8*)a;
+    uint8* q = (uint8*)b;
+    uint64 i = 0;
+
+    while(i + 8 <= n) {
+        if(*(uint64*)(p + i) != *(uint64*)(q + i)) {
+            break;
+        }
+        i = i + 8;
+    }
+
+    for(; i < n; ++i) {
+        uint32 x = p[i];
+        uint32 y = q[i];
+        if(x != y) {
+            x = lower8(x);
+            y = lower8(y);
+            if(x != y) {
+                call (int32)x - (int32)y;
+            }
+        }
+    }
+    call 0;
+}
+
+int32 memicmp(link a, link b, uint64 n) {
+    call _memicmp(a, b, n);
+}
+
+link wmemcpy(link dst, link src, uint64 count) {
+    call memcpy(dst, src, count << 1);
+}
+
+link wmemmove(link dst, link src, uint64 count) {
+    call memmove(dst, src, count << 1);
+}
+
+link wmemset(link dst, uint16 w, uint64 count) {
+    uint8* d = (uint8*)dst;
+    uint64 n = count << 1;
+    uint64 v = (uint64)w * (uint64)0x0001000100010001;
+
+    if(n <= 16) {
+        if(n >= 8) {
+            *(uint64*)d = v;
+            *(uint64*)(d + (n - 8)) = v;
+            call dst;
+        }
+        if(n >= 4) {
+            uint32 t = (uint32)v;
+            *(uint32*)d = t;
+            *(uint32*)(d + (n - 4)) = t;
+            call dst;
+        }
+        if(n == 2) {
+            *(uint16*)d = w;
+        }
+        call dst;
+    }
+
+    if(n <= 32) {
+        __vfill16x2(d, v, n);
+        call dst;
+    }
+    if(n <= 64) {
+        __vfill32x2(d, v, n);
+        call dst;
+    }
+    if(n <= 128) {
+        __vfill64x2(d, v, n);
+        call dst;
+    }
+
+    uint8* dl = d + (n - 64);
+    __vfill64(d, v);
+    uint64 adj = 64 - ((uint64)d & 63);
+    d = d + adj;
+    while(d < dl) {
+        __vfill64(d, v);
+        d = d + 64;
+    }
+    __vfill64(dl, v);
+    call dst;
+}
+
+static int32 wdiff_at(uint8* p, uint8* q, uint64 i) {
+    call (int32)((uint16*)p)[i] - (int32)((uint16*)q)[i];
+}
+
+int32 wmemcmp(link a, link b, uint64 count) {
+    uint64 n = count << 1;
+
+    if(n >= 16) {
+        uint8* p = (uint8*)a;
+        uint8* q = (uint8*)b;
+        uint8* pl = p + (n - 16);
+        uint8* ql = q + (n - 16);
+        while(p < pl) {
+            uint32 m = __vdiff16(p, q);
+            if(m != 0) {
+                call wdiff_at(p, q, __ctz(m) >> 1);
+            }
+            p = p + 16;
+            q = q + 16;
+        }
+        uint32 t = __vdiff16(pl, ql);
+        if(t != 0) {
+            call wdiff_at(pl, ql, __ctz(t) >> 1);
+        }
+        call 0;
+    }
+
+    uint16* x = (uint16*)a;
+    uint16* y = (uint16*)b;
+    for(uint64 i = 0; i < count; ++i) {
+        if(x[i] != y[i]) {
+            call (int32)x[i] - (int32)y[i];
+        }
+    }
+    call 0;
+}
+
+link wmemchr(link s, uint16 w, uint64 count) {
+    uint64 n = count << 1;
+
+    if(n >= 16) {
+        uint8* p = (uint8*)s;
+        uint64 v = (uint64)w * (uint64)0x0001000100010001;
+        uint8* pl = p + (n - 16);
+        while(p < pl) {
+            uint32 m = __vfindw16(p, v);
+            if(m != 0) {
+                call (link)(p + __ctz(m));
+            }
+            p = p + 16;
+        }
+        uint32 t = __vfindw16(pl, v);
+        if(t != 0) {
+            call (link)(pl + __ctz(t));
+        }
+        call NULL;
+    }
+
+    uint16* q = (uint16*)s;
+    for(uint64 i = 0; i < count; ++i) {
+        if(q[i] == w) {
+            call (link)(q + i);
+        }
+    }
+    call NULL;
+}

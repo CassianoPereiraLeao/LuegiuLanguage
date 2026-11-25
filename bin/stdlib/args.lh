@@ -1,0 +1,19 @@
+use target -> single
+
+preprocess va_list -> int64*
+
+funcpreprocess va_start(ap, last) ->
+    #ap = __va_start()
+<-
+
+funcpreprocess va_arg(ap, T) ->
+    (*(#T*)(#ap++))
+<-
+
+funcpreprocess va_copy(dst, src) ->
+    #dst = #src
+<-
+
+funcpreprocess va_end(ap) ->
+    #ap = (int64*)0
+<-

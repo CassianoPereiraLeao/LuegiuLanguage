@@ -1,0 +1,7 @@
+extract -> "../bootstrap/include/parser.lh"
+
+static const uint64 t1 = __offsetof(Node, ast);
+static const uint64 t2 = (16U + 15U) & 255U;
+static const uint64 t3 = ~(uint64)15U;
+static const uint64 t4 = (uint64)(32U + 15U) & ~(uint64)15U;
+static const uint64 t5 = bytes(((Node*)0)->ast.literal);

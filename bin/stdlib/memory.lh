@@ -1,0 +1,37 @@
+use target -> single
+
+extract -> [kernel32]
+extract -> [windows.lh]
+
+preprocess CHUNK     -> 262144
+preprocess MAX_SMALL -> 1024
+preprocess UI64MAX -> 0xFFFFFFFFFFFFFFFF
+preprocess UI64MIN -> 0x00
+preprocess I64MAX -> 9223372036854775807
+preprocess I64MIN -> -I64MAX - 1
+preprocess FLT_MAX -> 340282346638528859811704183484516925440.0f
+preprocess DBL_MAX -> 179769313486231570814527423731704356798070567525844931572607.0
+preprocess TAG_SYS   -> 65
+preprocess KB -> 1024
+preprocess MB -> (1024 * 1024)
+
+extern link malloc(uint64 size);
+extern void free(link p);
+extern link calloc(uint64 n, uint64 size);
+extern link realloc(link p, uint64 size);
+extern link memmove(link dst, link src, uint64 n);
+extern link memcpy(link dst, link src, uint64 n);
+extern int32 memcmp(link a, link b, uint64 n);
+extern int32 diff_at(uint8* p, uint8* q, uint64 i);
+extern link memset(link dst, int32 c, uint64 n);
+extern link memchr(link s, int32 c, uint64 n);
+extern void bcopy(link src, link dst, uint64 n);
+extern void bzero(link p, uint64 n);
+extern int32 bcmp(link a, link b, uint64 n);
+extern link memmem(link hay, uint64 hl, link nee, uint64 nl);
+extern link mempcpy(link dst, link src, uint64 n);
+extern link memccpy(link dst, link src, int32 c, uint64 n);
+extern link memrchr(link s, int32 c, uint64 n);
+extern link memchr(link s, int32 c, uint64 n);
+extern int32 wmemcmp(link a, link b, uint64 count);
+extern link wmemchr(link s, uint16 w, uint64 count);

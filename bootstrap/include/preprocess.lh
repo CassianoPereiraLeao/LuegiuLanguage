@@ -1,0 +1,197 @@
+use target -> single
+
+extract -> "common.lh"
+extract -> "arena.lh"
+extract -> [hash.lh]
+
+preprocess STRING_BUILDER_INIT_CAPACITY -> (4U * KB)
+preprocess MAX_CAP_PER_FILE -> (128U * MB)
+preprocess MAX_INCLUDE_DEPTH -> 64
+preprocess MAX_EXPANSION_DEPTH -> 200
+preprocess MAX_MACRO_PARAMS -> 127
+
+preprocess COMMENT_OPEN -> "/comment"
+preprocess COMMENT_OPEN_LEN -> 8
+preprocess COMMENT_CLOSE -> "endcomment/"
+preprocess COMMENT_CLOSE_LEN -> 11
+
+preprocess EXTRACT_USAGE -> "Uso: extract -> [arquivo.lh]"
+
+funcpreprocess CLS(c) ->
+    (g_cls[(uint8)#c])
+<-
+
+funcpreprocess IS_IDC(c) ->
+    (g_idc[(uint8)#c])
+<-
+
+funcpreprocess IS_WS(c) ->
+    (CLS(#c) == ClsMode:<WS)
+<-
+
+funcpreprocess FLUSH_TEXT(upto) ->
+    do {
+        uint64 u_ = (#upto);
+        if(u_ > ts) {
+            temp[np].text = buffer + ts;
+            temp[np].len = (uint32)(u_ - ts);
+            temp[np].param = -1;
+            temp[np].kind = MacroPartKind:<TEXT;
+            np++;
+        }
+    } while(0)
+<-
+
+funcpreprocess FLUSH_TO(upto) -> 
+    do {
+        const char* u_ = (#upto);
+        if(u_ > flush) sb_write(dst, flush, (uint64)(u_ - flush));
+    } while(0)
+<-
+
+newtype data IncludeFile IncludeFile;
+newtype data LinkItem LinkItem;
+newtype data Macro Macro;
+
+newtype enum {
+    SINGLE,
+    MULTIPLE
+} IncludePolicy;
+
+newtype enum {
+    STDLIB,
+    USER_DIR
+} ExtractType;
+
+newtype enum {
+    OBJECT,
+    DLL
+} LinkKind;
+
+newtype enum {
+    OBJECT,
+    FUNCTION,
+    BUILTIN_LINE,
+    BUILTIN_FILE,
+    BUILTIN_COUNTER
+} MacroKind;
+
+newtype enum {
+    TEXT,
+    PARAM
+} MacroPartKind;
+
+newtype enum {
+    OTHER, WS, NL,
+    IDENT, DIGIT, QUOTE,
+    APOS, SLASH
+} ClsMode;
+
+data LinkItem {
+    const char* path;
+    LinkKind kind;
+    data LinkItem* next;
+};
+
+data IncludeFile {
+    const char* path;
+    data IncludeFile* next;
+};
+
+newtype data {
+    const char* original_src;
+    const char* process_str;
+    uint32 process_len;
+    LinkItem* links;
+    uint32 link_count;
+} Preprocess;
+
+newtype data {
+    const char* text;
+    uint32 len;
+    int32 param;
+    MacroPartKind kind;
+} MacroPart;
+
+data Macro {
+    const char* name;
+    uint32 name_len;
+    const char* value;
+    uint32 value_len;
+    data Macro* next;
+
+    uint32 hash;
+    MacroKind kind;
+    int32 nparams;
+    bool has_ident;
+    bool disable;
+
+    MacroPart* parts;
+    uint32 nparts;
+};
+
+newtype data {
+    uint32 out;
+    uint32 src;
+    const char* filename;
+} LineMapEntry;
+
+newtype data {
+    uint32 count;
+    uint32 capacity;
+    LineMapEntry* v;
+} LineMap;
+
+newtype data {
+    char* src;
+    uint32 len;
+    uint32 capacity;
+    Arena* arena;
+} StringBuilder;
+
+newtype data {
+    const char* raw;
+    uint32 raw_len;
+} ArgInfo;
+
+newtype data {
+    StringBuilder norm;
+    StringBuilder subst;
+    StringBuilder exp[MAX_MACRO_PARAMS + 1];
+    ArgInfo args[MAX_MACRO_PARAMS + 1];
+} Level;
+
+newtype data {
+    Arena *arena;
+    const char* lib_dir;
+    StringBuilder* sb;
+    LineMap* map;
+
+    Macro** table;
+    uint32 table_cap;
+    uint32 table_count;
+    uint32 first_mask[8];
+    uint32 len_mask;
+
+    Level* levels[MAX_EXPANSION_DEPTH + 2];
+    StringBuilder temp;
+    StringBuilder blank;
+
+    IncludeFile* included;
+
+    LinkItem* links;
+    LinkItem* links_tail;
+    uint32 link_count;
+
+    const char* cur_file;
+    const char* cur_dir;
+    const char* cur_end;
+    uint32 src_line;
+    uint32 out_line;
+    uint32 counter;
+    int32 include_depth;
+} Pp;
+
+void linemap_init(LineMap *map);
+void linemap_resolve(LineMap *map, uint32 out, const char** file_out, int32 *line_out); 
+void preprocess_run(Preprocess *pp, const char* filepath, const char* lib_dir, Arena *arena, LineMap *map);

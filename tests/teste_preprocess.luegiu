@@ -1,0 +1,10 @@
+preprocess Tablet -> "Tablet"
+funcpreprocess Tab(ALIAS) ->
+    void #ALIAS_tab() {
+        call;
+    }
+<-
+
+char ok = Tablet;
+
+Tab(tab)

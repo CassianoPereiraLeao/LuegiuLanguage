@@ -1,0 +1,15 @@
+extract -> [io.lh]
+
+link end(hexa code) {
+    call code;
+}
+
+link start(uint16 argc, char** argv) {
+    link file = open("./newfile.txt", OpenFileMode:<WRITE_FILE);
+
+    int32 bytes_write = fwrite(file, "Ola, Mundo! Voce tem o nome de %d", 2);
+    if(bytes_write <= 0) call end(0x01);
+
+    close(file);
+    call end(0x00);
+}

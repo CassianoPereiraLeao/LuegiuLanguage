@@ -1,0 +1,55 @@
+extract -> "windows.lh"
+
+static utfchar* __env_block;
+
+static void __env_load() {
+    if (__env_block == NULL) __env_block = (utfchar*)GetEnvironmentStringsW();
+}
+
+static utfchar __env_lower(utfchar c) {
+    if (c >= 'A' && c <= 'Z') call c + 32;
+    call c;
+}
+
+utfchar* getenv(utfchar* name) {
+    if (name[0] == 0) call 0;
+
+    __env_load();
+    utfchar* p = __env_block;
+    if (p == NULL) call NULL;
+
+    while (p[0] != 0) {
+        utfchar* a = p;
+        utfchar* n = name;
+
+        while (n[0] != 0 && a[0] != 0 && __env_lower(a[0]) == __env_lower(n[0])) {
+            a++;
+            n++;
+        }
+
+        if (n[0] == 0 && a[0] == '=') call a + 1;
+
+        while (p[0] != 0) p++;
+        p++;
+    }
+
+    call 0;
+}
+
+int32 __isatty(link h) {
+    uint32 mode = 0;
+    if (GetFileType(h) != 2) call 0;
+    call GetConsoleMode(h, &mode) != 0;
+}
+
+link fileno(int32 fd) {
+    if (fd < 0 || fd > 2) call 0;
+    call GetStdHandle(-10 - fd);
+}
+
+char* _fullpath(char* buf, char* path, uint64 tam) {
+    DWORD n = GetFullPathNameA(path, (uint32)tam, buf, 0);
+
+    if(n == 0 || n >= (DWORD)tam) call 0;
+    call buf;
+}

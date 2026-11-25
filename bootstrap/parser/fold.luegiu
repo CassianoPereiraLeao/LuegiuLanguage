@@ -1,0 +1,354 @@
+extract -> "../include/typecheck.lh"
+
+newtype enum {
+    OK,
+    OVERFLOW,
+    SKIP
+} FoldResult;
+
+static int32 wrap_width(TokenType base) {
+    call base == TokenType:<KHEXA ? 64 : integerwidth(base);
+}
+
+static bool wrap_unsigned(TokenType base) {
+    call (bool)(base == TokenType:<KHEXA || isunsignedbase(base));
+}
+
+static int32 fold_width(TokenType base) {
+    call base == TokenType:<KHEXA ? 64 : integerwidth(base);
+}
+
+static bool fold_is_unsigned(TokenType base) {
+    call (bool)(base == TokenType:<KHEXA || isunsignedbase(base));
+}
+
+void const_wrap(ConstInt *cint, Typecheck type) {
+    int32 width = wrap_width(type.base);
+    if(width == 0) call;
+
+    bool unsigned = wrap_unsigned(type.base);
+    uint64 u = (uint64)cint->value;
+
+    if(width < 64) {
+        uint64 mask = (1U << width) - 1;
+        u &= mask;
+        if(!unsigned && (u >> (width - 1))) u |= ~mask;
+    }
+
+    cint->value = (big)u;
+    cint->_big = (bool)(unsigned && width == 64 && cint->value < 0);
+}
+
+static int32 hex_digit(uint8 c) {
+    if(c >= '0' && c <= '9') call c - '0';
+    if(c >= 'a' && c <= 'f') call c - 'a' + 10;
+    if(c >= 'A' && c <= 'F') call c - 'A' + 10;
+    call -1;
+}
+
+bool decode_char_literal(View v, uint64 *out) {
+    const uint8* s = (const uint8*)v.start;
+    uint64 n = v.len;
+    if(!s || n == 0) call false;
+
+    if(n >= 2 && s[0] == 'W' && s[1] == '\'') {
+        s++;
+        n--;
+    }
+
+    if(n >= 2 && s[0] == '\'' && s[n - 1] == '\'') {
+        s++;
+        n -= 2;
+    }
+
+    if(n == 0) call false;
+
+    uint64 value = 0;
+    uint64 i = 0;
+
+    if(s[0] == '\\') {
+        if(n < 0) call false;
+        i = 2;
+
+        if(s[1] == 'n') { value = '\n'; jump end; }
+        else if(s[1] == 't') { value = '\t'; jump end; }
+        else if(s[1] == 'r') { value = '\r'; jump end; }
+        else if(s[1] == 'a') { value = '\a'; jump end; }
+        else if(s[1] == 'b') { value = '\b'; jump end; }
+        else if(s[1] == 'f') { value = '\f'; jump end; }
+        else if(s[1] == 'v') { value = '\v'; jump end; }
+        else if(s[1] == '\\') { value = '\\'; jump end; }
+        else if(s[1] == '\'') { value = '\''; jump end; }
+        else if(s[1] == '"') { value = '"'; jump end; }
+        else if(s[1] == '?') { value = '?'; jump end; }
+        else if(s[1] == 'x' || s[1] == 'u' || s[1] == 'U') {
+            uint64 max = s[1] == 'x' ? (uint64)8 : (s[1] == 'u') ? (uint64)4 : (uint64)8;
+            uint64 digits = 0;
+
+            while(i < n && digits < max && hex_digit(s[i]) >= 0) {
+                value = value * 16 + (uint16)hex_digit(s[i]);
+                i++;
+                digits++;
+            }
+            
+            if(digits == 0 || (s[i] != 'x' && digits != max)) call false;
+            jump end;
+        }
+        else if(s[1] == '0' || s[1] == '1' || s[1] == '2' || s[1] == '3' ||
+            s[1] == '4' || s[1] == '5' || s[1] == '6' || s[1] == '7') {
+            value = (uint16)(s[1] - '0');
+
+            for(int32 k = 0; k < 2 && i < n && s[i] >= '0' && s[i] <= '7'; ++k) {
+                value = value * 8 + (uint16)(s[i] - '0');
+                ++i;
+            }
+
+            jump end;
+        }
+
+        call false;
+    } else if(s[0] < 0x80) {
+        value = s[0];
+        i = 1;
+    } else {
+        uint64 extra = 0;
+        if(((hexa)s[0]& 0xE0) == 0xC0) {
+            extra = 1;
+            value = (uint64)((hexa)s[0]& 0x1F);
+        } else if(((hexa)s[0]& 0xF0) == 0xE0) {
+            extra = 2;
+            value = (uint64)((hexa)s[0]& 0x0F);
+        } else if(((hexa)s[0]& 0xF8) == 0xF0) {
+            extra = 3;
+            value = (uint64)((hexa)s[0]& 0x07);
+        }
+        else call false;
+
+        if(n < 1 + extra) call false;
+
+        for(uint64 k = 1; k <= extra; ++k) {
+            if(((hexa)s[k]& 0xC0) != 0x80) call false;
+            value = (uint64)((hexa)(value << 6) | ((hexa)s[k]& 0x3F));
+        }
+
+        i = 1 + extra;
+    }
+
+    load end;
+    if(i != n) call false;
+    *out = value;
+    call true;
+}
+
+bool is_numeric_constant(Node *node) {
+    if(!node) call false;
+
+    if(node->kind == NodeKinds:<NODE_LITERAL) {
+        if(node->ast.literal.kind == LiteralKind:<INT || node->ast.literal.kind == LiteralKind:<BIG || node->ast.literal.kind == LiteralKind:<UNSIGNED ||
+            node->ast.literal.kind == LiteralKind:<HEXA || node->ast.literal.kind == LiteralKind:<FLOAT || node->ast.literal.kind == LiteralKind:<DOUBLE ||
+            node->ast.literal.kind == LiteralKind:<CHAR || node->ast.literal.kind == LiteralKind:<WIDE_CHAR)
+            call true;
+        call false;
+    }
+
+    if(node->kind == NodeKinds:<NODE_UNARY_OP && (node->ast.unary.op == TokenType:<OPMINUS || node->ast.unary.op == TokenType:<OPPLUS))
+        call is_numeric_constant(node->ast.unary.operand);
+
+    call false;
+}
+
+static bool is_int_literal(Node *node) {
+    call (bool)(node && node->kind == NodeKinds:<NODE_LITERAL &&
+                (node->ast.literal.kind == LiteralKind:<INT || node->ast.literal.kind == LiteralKind:<BIG ||
+                node->ast.literal.kind == LiteralKind:<UNSIGNED || node->ast.literal.kind == LiteralKind:<HEXA));
+}
+
+static FoldResult fold_signed(TokenType op, int64 a, int64 b, int32 width, int64 *out) {
+    int64 result = 0;
+   
+    if(op == TokenType:<OPPLUS) {
+        if((b > 0 && a > I64MAX - b) || (b < 0 && a < I64MIN - b)) call FoldResult:<OVERFLOW;
+        result = a + b;
+    } else if(op == TokenType:<OPMINUS)     {
+        if((b < 0 && a > I64MAX + b) || (b > 0 && a < I64MIN + b)) call FoldResult:<OVERFLOW;
+        result = a- b;
+    } else if(op == TokenType:<OPSTAR) {
+        if(a != 0 && b != 0) {
+            bool overflow = a > 0 ? (bool)(b > 0 ? a > I64MAX / b : b < I64MIN / a)
+                            : (bool)(b > 0 ? a < I64MIN / b : b < I64MAX / a);
+            if(overflow) call FoldResult:<OVERFLOW;
+        }
+        result  = a * b;
+    } else if(op == TokenType:<OPSLASH) {
+        if(b == 0) call FoldResult:<SKIP;
+        if(a == I64MIN && b == -1) call FoldResult:<OVERFLOW;
+        result = a / b;
+    } else if(op == TokenType:<OPMOD) {
+        if(b == 0) call FoldResult:<SKIP;
+        result = (b == -1) ? 0 : a % b;
+    } else if(op == TokenType:<OPSHL) {
+        if(b < 0 || b >= 64) call FoldResult:<SKIP;
+        result = (int64)((uint64)a << b);
+        if((result >> b) != a) call FoldResult:<OVERFLOW;
+    } else if(op == TokenType:<OPSHR) {
+        if(b < 0 || b >= 64) call FoldResult:<SKIP;
+        result = a >> b;
+    } else if(op == TokenType:<OPAND) {
+        result = a & b;
+    } else if(op == TokenType:<OPOR) {
+        result = a | b;
+    } else if(op == TokenType:<OPXOR) {
+        result = a ^ b;
+    } else {
+        call FoldResult:<SKIP;
+    }
+
+    if(width < 64) {
+        int64 max = (1B << (width - 1)) - 1;
+        if(result > max || result < -max - 1) call FoldResult:<OVERFLOW;
+    }
+
+    *out = result;
+    call FoldResult:<OK;
+}
+
+static FoldResult fold_unsigned(TokenType op, uint64 a, uint64 b, int32 width, uint64 *out) {
+    uint64 result = 0;
+
+    if(op == TokenType:<OPPLUS) {
+        result = a + b;
+        if(result < a) call FoldResult:<OVERFLOW;
+    } else if(op == TokenType:<OPMINUS) {
+        if(a < b) call FoldResult:<OVERFLOW;
+        result = a - b;
+    } else if(op == TokenType:<OPSTAR) {
+        if(a && b > UI64MAX / a) call FoldResult:<OVERFLOW;
+        result = a * b;
+    } else if(op == TokenType:<OPSLASH) {
+        if(b == 0) call FoldResult:<SKIP;
+        result = a / b;
+    } else if(op == TokenType:<OPMOD) {
+        if(b == 0) call FoldResult:<SKIP;
+        result = a % b;
+    } else if(op == TokenType:<OPSHL) {
+        if(b >= 64) call FoldResult:<SKIP;
+        result = a << b;
+        if((result >> b) != a) call FoldResult:<OVERFLOW;
+    } else if(op == TokenType:<OPSHR) {
+        if(b >= 64) call FoldResult:<SKIP;
+        result = a >> b;
+    } else if(op == TokenType:<OPAND) {
+        result = a & b;
+    } else if(op == TokenType:<OPOR) {
+        result = a | b;
+    } else if(op == TokenType:<OPXOR) {
+        result = a ^ b;
+    } else {
+        call FoldResult:<SKIP;
+    }
+
+    if(width < 64 && result > ((1U << width) - 1)) call FoldResult:<OVERFLOW;
+    
+    *out = result;
+    call FoldResult:<OK;
+}
+
+static void fold_literal_binary(CheckContext *ctx, Node *node, Typecheck result) {
+    Node* left = node->ast.binary.left;
+    Node* right = node->ast.binary.right;
+    TokenType op = node->ast.binary.op;
+
+    if(!is_int_literal(left) || !is_int_literal(right) || !is_prim_scalar(result)) call;
+
+    if(op != TokenType:<OPPLUS && op != TokenType:<OPMINUS && op != TokenType:<OPSTAR &&
+        op != TokenType:<OPSLASH && op != TokenType:<OPMOD && op != TokenType:<OPAND &&
+        op != TokenType:<OPOR && op != TokenType:<OPXOR && op != TokenType:<OPSHL &&
+        op != TokenType:<OPSHR) call;
+
+    LiteralKind kind;
+    if(result.base == TokenType:<KINT32) kind = LiteralKind:<INT;
+    else if(result.base == TokenType:<KBIG) kind = LiteralKind:<BIG;
+    else if(result.base == TokenType:<KUINT32) kind = LiteralKind:<UNSIGNED;
+    else if(result.base == TokenType:<KHEXA) kind = LiteralKind:<HEXA;
+    else call;
+
+    ConstInt a, b;
+    if(!const_eval(left, &a) || !const_eval(right, &b)) call;
+
+    int32 width = (kind == LiteralKind:<INT || kind == LiteralKind:<UNSIGNED) ? 32 : 64;
+    bool is_unsigned = (bool)(kind == LiteralKind:<UNSIGNED || kind == LiteralKind:<HEXA);
+
+    int64 res = 0;
+    uint64 ures = 0;
+    FoldResult foldresult;
+
+    if(is_unsigned) {
+        if((!a._big && a.value < 0) || (!b._big && b.value < 0)) call;
+        foldresult = fold_unsigned(op, (uint64)a.value, (uint64)b.value, width, &ures);
+    } else {
+        if(a._big || b._big) call;
+        foldresult = fold_signed(op, a.value, b.value, width, &res);
+    }
+
+    if(foldresult == FoldResult:<SKIP) call;
+    if(foldresult == FoldResult:<OVERFLOW) {
+        diag_error(ctx->ctx, node->filepath, node->line, node->col, "Overflow em expressao constante: o resultado excede o alcance de '%s'.", tname(result));
+        call;
+    }
+
+    node->kind = NodeKinds:<NODE_LITERAL;
+    node->ast.literal.kind = kind;
+    if(is_unsigned) node->ast.literal.value.u64 = ures;
+    else node->ast.literal.value.i64 = res;
+}
+
+bool fold_const_binary(CheckContext *ctx, Node *node, Typecheck result) {
+    TokenType op = node->ast.binary.op;
+
+    if(!is_prim_scalar(result) || !isintegerbase(result.base)) call true;
+
+    if(op != TokenType:<OPPLUS && op != TokenType:<OPMINUS && op != TokenType:<OPSTAR &&
+        op != TokenType:<OPSLASH && op != TokenType:<OPMOD && op != TokenType:<OPAND &&
+        op != TokenType:<OPOR && op != TokenType:<OPXOR && op != TokenType:<OPSHL &&
+        op != TokenType:<OPSHR) call true;
+
+    int32 width = wrap_width(result.base);
+    if(width == 0) call true;
+    bool is_unsigned = wrap_unsigned(result.base);
+
+    ConstInt a, b;
+    if(!const_eval(node->ast.binary.left, &a) || !const_eval(node->ast.binary.right, &b)) call true;
+
+    int64 res = 0;
+    uint64 ures = 0;
+    FoldResult foldresult;
+
+    if(is_unsigned) {
+        if((!a._big && a.value < 0) || (!b._big && b.value < 0)) call true;
+        foldresult = fold_unsigned(op, (uint64)a.value, (uint64)b.value, width, &ures);
+    } else {
+        if(a._big || b._big) call true;
+        foldresult = fold_signed(op, a.value, b.value, width, &res);
+    }
+
+    if(foldresult == FoldResult:<SKIP) call true;
+
+    if(foldresult == FoldResult:<OVERFLOW) {
+        diag_error(ctx->ctx, node->filepath, node->line, node->col, 
+            "Overflow em expressao constante: o resultado excede o alcance de '%s' (%d bits).", tname(result), width);
+        call false;
+    }
+
+    LiteralKind kind;
+    if(result.base == TokenType:<KINT32) kind = LiteralKind:<INT;
+    else if(result.base == TokenType:<KBIG) kind = LiteralKind:<BIG;
+    else if(result.base == TokenType:<KUINT32) kind = LiteralKind:<UNSIGNED;
+    else if(result.base == TokenType:<KHEXA) kind = LiteralKind:<HEXA;
+    else call true;
+
+    node->kind = NodeKinds:<NODE_LITERAL;
+    node->ast.literal.kind = kind;
+    if(is_unsigned) node->ast.literal.value.u64 = ures;
+    else node->ast.literal.value.i64 = res;
+    call true;
+}

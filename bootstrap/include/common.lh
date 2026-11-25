@@ -1,0 +1,106 @@
+use target -> single
+
+extract -> [string.lh]
+extract -> [memory.lh]
+extract -> [io.lh]
+extract -> [error.lh]
+
+funcpreprocess LIKELY(x) ->
+    __builtin_expected(!!(#x), 1)
+<-
+
+funcpreprocess UNLIKELY(x) ->
+    __builtin_expected(!!(#x), 0)
+<-
+
+structpreprocess ARRAY_DEFINE(ALIAS, TYPE) -> 
+    data #{ALIAS} {
+        uint64 capacity;
+        uint64 count;
+        #{TYPE}* items;
+    }
+<-
+
+preprocess INIT_CAP -> KB
+preprocess MAX_CAP -> (MB * 1024)
+
+newtype enum {
+    EOFF, UNDEFINED,
+
+    IDENTIFIER, STRING_LIT, CHAR_LIT, HEXA_LIT,
+    INT_LIT, FLOAT_LIT, DOUBLE_LIT, UNSIGNED_LIT,
+    BIG_LIT, WSTRING_LIT, WCHAR_LIT,
+
+    OPEN_PAREN, CLOSE_PAREN, OPEN_BRACKET,
+    CLOSE_BRACKET, OPEN_BRACE, CLOSE_BRACE,
+
+    COLON, SEMICOLON, ELLIPSES, COMMA, DOT,
+
+    OPSHL, OPSHR, OPPLUS, OPPLUSPLUS,
+    OPMINUS, OPMINUSMINUS, OPMOD, OPSLASH,
+    OPSTAR, OPBANG, OPXOR, OPAND,
+    OPOR, OPGT, OPLT, DESC,
+    ARROW, ASSIGN,
+
+    OPEQ, OPSHLE, OPSHRE, OPPLUSE,
+    OPMINUSE, OPSLASHE, OPBANGE, OPMODE,
+    OPSTARE, LOGOR, LOGAND, OPXORE,
+    OPORE, OPANDE, OPGE, OPLE,
+    OPTERN,
+
+    KDATA, KENUM, KCOPERATE, KNEWTYPE, KWHILE, KFOR,
+    KDO, KIF, KELSE, KCONST, KSTATIC, KATOMIC, KLOAD,
+    KCALL, KBREAK, KCONTINUE, KJUMP, KEXTERN, KBYTES,
+
+    KVOID, KSMALL, KLINK, KHEXA, KCHAR, KUTFCHAR,
+    KFLOAT, KDOUBLE, KBIG, KUINT8, KUINT16, KUINT32,
+    KUINT64, KINT8, KINT16, KINT32, KINT64, KINLINE
+} TokenType;
+
+newtype enum {
+    NODE_UNDEFINED,
+    NODE_VAR_DECL,
+    NODE_FUNC_DECL,
+    NODE_VAR_CALL,
+    NODE_FUNC_CALL,
+    NODE_LITERAL,
+    NODE_BYTES,
+    NODE_IF_STMT,
+    NODE_BLOCK_STMT,
+    NODE_CALL_STMT,
+    NODE_BREAK_STMT,
+    NODE_CONTINUE_STMT,
+    NODE_FOR_LOOP,
+    NODE_WHILE_LOOP,
+    NODE_DO_WHILE_LOOP,
+    NODE_DATA,
+    NODE_ENUM,
+    NODE_ENUM_CALL,
+    NODE_ENUM_MEMBER,
+    NODE_COPERATE,
+    NODE_TERNARY,
+    NODE_NEWTYPE,
+    NODE_FIELD_CALL,
+    NODE_CAST,
+    NODE_PROGRAM,
+    NODE_BINARY_OP,
+    NODE_UNARY_OP,
+    NODE_POSTFIX_OP,
+    NODE_ARRAY,
+    NODE_LOAD_LABEL,
+    NODE_JUMP_LABEL,
+    NODE_INIT_LIST,
+    NODE_DESIGNATOR
+} NodeKinds;
+
+newtype enum {
+    INT, BIG, UNSIGNED,
+    CHAR, FLOAT, DOUBLE,
+    HEXA, STRING, WIDE_CHAR,
+    WIDE_STRING
+} LiteralKind;
+
+newtype data {
+    const char* start;
+    uint64 len;
+} View;

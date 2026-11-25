@@ -1,0 +1,30 @@
+use target -> single
+
+extract -> "common.lh"
+
+preprocess MAX_ARRAY_RANK -> 8
+
+newtype data AggregateDef AggregateDef;
+
+newtype enum {
+    PRIMARY,
+    ENUM,
+    AGGREGATE,
+    NEWTYPE
+} TypeClass;
+
+newtype data {
+    View alias;
+    AggregateDef* inline_define;
+    uint64 array_size;
+    TokenType base;
+    TokenType repr;
+    TypeClass cls;
+    uint32 array_dims[MAX_ARRAY_RANK];
+    uint8 ptr_lvl;
+    uint8 array_rank;
+    bool _atomic;
+    bool _array;
+    bool _vla;
+    bool error;
+} Typecheck;
