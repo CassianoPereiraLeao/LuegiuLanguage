@@ -1,6 +1,0 @@
-extract -> "error.lh"
-
-void exit(ErrorCodeSystem code) {
-    fwrite(stderr, "[luegiu] exit com o codigo de erro: %d", (int32)code);
-    ExitProcess((DWORD)code);
-}

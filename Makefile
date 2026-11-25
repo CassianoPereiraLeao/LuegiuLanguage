@@ -102,7 +102,7 @@ v-test: all
 bootstrap: all
 	.\bin\luegiu.exe .\bootstrap\parser\fold.luegiu .\bootstrap\helpers\string_helper.luegiu .\bootstrap\parser\parser.luegiu .\bootstrap\lexer\lexer.luegiu .\bootstrap\main.luegiu .\bootstrap\preprocess\preprocess.luegiu .\bootstrap\arena\arena.luegiu .\bootstrap\diagnostic\diagnostic.luegiu flag-out .\bootstrap\bin\luegiu.exe
 
-sopraver: bootstrap
+testing-bootstrap: bootstrap
 	.\bootstrap\bin\luegiu.exe .\bootstrap\main.luegiu
 
 parser-asm-testing: all

@@ -1,0 +1,9 @@
+*.d
+bin/stdlib/*.luegiu
+bootstrap/bin
+build/
+debug/
+tests/
+testeunitspreview.txt
+windowsfunctionsviewer.c
+teste.exe
